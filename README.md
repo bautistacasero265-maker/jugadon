@@ -2,163 +2,126 @@
 
 # Jugadón
 
-Clips de juegos para Windows 10/11, pensado para PCs de pocos recursos. Vive en la bandeja del sistema. Mientras jugás, guarda siempre los últimos segundos; cuando apretás **F9**, se guardan como `.mp4` con un sonidito de confirmación. **F10** saca una captura en `.png`. No tiene ventanas, galería ni cuenta: es lo mínimo para que el juego no lo sienta.
+**Clips de juegos para Windows 10 y 11, pensado para PCs de pocos recursos.** Hecho en Rust, sin cuentas y sin internet. Mientras jugás, Jugadón recuerda los últimos segundos; cuando hacés una jugada buena apretás **F9** y queda guardada como `.mp4`.
 
-- 🎮 **Clips en segundo plano, como vos quieras.** Pueden estar activos solo mientras jugás (viene así), siempre o apagados.
-- ⏺️ **Grabación normal**: **F8** empieza a grabar la pantalla completa y **F8** la frena y la guarda.
-- 🪟 **Grabar una sola ventana** (el juego, el navegador, Discord, la que sea). Sale solo esa ventana, aunque tengas otra cosa adelante.
-- ⚡ **Hecho en Rust, todo el video en la placa.** El procesador queda para el juego.
-- 🔊 **Sonido del juego + tu micrófono** (el mic viene activado; se apaga en Opciones).
-- 🗂️ **Ventana "Mis clips"**: oscura, con **miniaturas** de cada clip. Clic en el ícono y ves todos tus clips. Desde ahí los abrís, los compartís (con el menú Compartir de Windows), los copiás para Discord o los borrás.
-- 📋 **Copiar último clip**: lo pegás con Ctrl+V en Discord o WhatsApp.
-- 🔔 Aviso al guardar: tocalo y se abre el clip.
-
-## Bajar y usar
-
-1. Entrá a **[Releases](../../releases/latest)** y bajá `Jugadon-windows-x64.zip`.
-2. Descomprimilo en una carpeta (por ejemplo `C:\Jugadon`). Tienen que quedar juntos `jugadon.exe` y `ffmpeg.exe`.
-3. Abrí `jugadon.exe`. Aparece el ícono de Jugadón en la bandeja, al lado del reloj. Si no lo ves, tocá la flechita `^`.
-   - **Gris**: en pausa, esperando un juego.
-   - **Naranja** (<img src="assets/icon.png" width="16">): grabando.
-
-El exe no está firmado: Windows SmartScreen puede decir "Windows protegió su PC". Tocá **Más información → Ejecutar de todas formas**.
-
-| Tecla (por defecto) | Qué hace |
-|---|---|
-| **F9** | Guarda los últimos 30 s como clip |
-| **F10** | Saca una captura de pantalla (resolución completa) |
-| **F8** | Empieza a grabar la pantalla completa / la frena y la guarda |
-
-Los clips y capturas van a `Videos\Jugadon`. Al guardar suena un "tin-tin" y aparece un aviso. Si tocás el aviso, se abre la carpeta con el clip marcado.
-
-### Dos formas de grabar
-
-1. **Clips en segundo plano.** Jugadón guarda siempre los últimos segundos y vos decidís cuándo quedártelos con **F9**. Es lo de Medal. En el menú → **Clips en segundo plano** elegís:
-   - **Solo mientras juego** (recomendado, viene así): arranca solo cuando hay un juego en pantalla completa y se pausa en el escritorio. En pausa no consume nada.
-   - **Siempre**: graba los últimos segundos todo el tiempo.
-   - **Apagado**: no graba nada por su cuenta. Solo grabás cuando apretás F8.
-2. **Grabación de principio a fin.**
-   - **F8** (o menú → **Grabar pantalla completa**) empieza.
-   - Para una ventana: menú → **Grabar una ventana** y elegís cuál de la lista (aparecen con el nombre que muestran en la barra de título). Se graba **solo esa ventana**, aunque la tapes con otra o estés usando otra cosa adelante. Si cerrás la ventana, la grabación se frena y se guarda sola.
-   - **F8** de nuevo (o menú → **Frenar y guardar**) la frena y la guarda como `grabacion_….mp4`.
-   - Mientras graba, el ícono se pone **rojo** y al pasar el mouse muestra el tiempo.
-   - Si se corta la luz o se cuelga la PC, lo grabado se recupera solo la próxima vez que abrís Jugadón.
-
-**Los clips no se sacan solos.** Jugadón nunca decide qué es una buena jugada: el clip se guarda solo cuando vos apretás F9. "Solo mientras juego" decide únicamente *cuándo* está activa la memoria de los últimos segundos.
-
-**¿Cómo sabe que estás jugando?** Cada 2 segundos mira cuál es la ventana activa. Le alcanza con eso; no lee la memoria del juego ni se mete en él (por eso ningún anticheat lo marca). - Si la ventana activa tapa toda la pantalla principal (pantalla completa o "ventana sin bordes"), cuenta como juego y empiezan los clips.
-- Una ventana maximizada común (con la barra de tareas a la vista) no cuenta.
-- Después de salir del juego sigue 1 minuto más, así un alt-tab rápido no te borra el clip.
-
-### Ventana "Mis clips" (clic izquierdo en el ícono)
+- 🎮 **F9 guarda la jugada.** Los últimos 15 s, 30 s, 1, 2 o 5 minutos (vos elegís), con un "tin-tin" de confirmación.
+- ⏺️ **F8 graba de principio a fin**: la pantalla completa o **una sola ventana** (el juego, el navegador o cualquier otra), aunque tengas otra cosa adelante.
+- 📸 **F10 saca una captura** en `.png`.
+- 🔊 **Sonido del juego y tu micrófono.**
+- 🗂️ **Ventana "Mis clips"** con miniaturas: abrís, compartís (con el menú Compartir de Windows), copiás para pegar en Discord o WhatsApp, o borrás.
+- ⚡ **El video lo comprime la placa de video** (NVENC, AMF o Quick Sync), no el procesador. Sin juego abierto queda en pausa y no consume nada.
+- 🔒 **No se conecta a internet** ni manda datos a ningún lado. Tus clips quedan solo en tu PC.
 
 <p align="center"><img src="assets/captura_ventana.png" alt="Ventana Mis clips" width="85%"></p>
 
-Muestra tus clips, grabaciones y capturas con miniatura, del más nuevo al más viejo. Arriba tiene el estado (grabando o en pausa), cuántos archivos hay y cuánto ocupan. Botones:
-- **Abrir**: también con doble clic.
-- **Compartir…**: abre el menú Compartir de Windows (WhatsApp, correo, Compartir con dispositivos cercanos, etc.).
-- **Copiar**: después pegás con Ctrl+V en Discord o WhatsApp.
-- **Mostrar en carpeta**.
-- **Eliminar**: va a la papelera.
-- **Abrir carpeta**.
+## Instalar
 
-Está hecha con los controles propios de Windows: no usa un navegador por dentro, como Electron. Solo existe mientras la tenés abierta: **al cerrarla con la X se libera entera** y Jugadón sigue en la bandeja sin consumir.
+1. Entrá a **[Releases](../../releases/latest)** y bajá `Jugadon-windows-x64.zip`.
+2. Descomprimilo en una carpeta, por ejemplo `C:\Jugadon`. Tienen que quedar juntos `jugadon.exe` y `ffmpeg.exe`.
+3. Abrí `jugadon.exe`.
 
-Las miniaturas salen del caché del Explorador de Windows, así que en general no hace falta abrir los videos. Se cargan de a una, en segundo plano y con prioridad baja de CPU y disco, y se cortan apenas cerrás la ventana. También se abre con `jugadon.exe --clips`, útil para un acceso directo.
+**Windows puede decir "Windows protegió su PC"** porque el programa no está firmado (la firma digital es un certificado pago). Tocá **Más información → Ejecutar de todas formas**.
 
-### Menú (clic derecho en el ícono)
+Jugadón aparece como un ícono en la bandeja del sistema, al lado del reloj. Si no lo ves, tocá la flechita `^`.
 
-- Arriba de todo, el **estado**: grabando (y con qué encoder), en pausa o error.
-- **Ver mis clips…**: abre la ventana de arriba.
-- **Guardar clip** / **Captura**: lo mismo que las teclas.
-- **Grabar pantalla completa** / **Grabar una ventana ▸** / **Frenar y guardar grabación**.
-- **Copiar último clip**: después pegalo con Ctrl+V en Discord, WhatsApp, etc.
+| Ícono | Qué significa |
+|---|---|
+| <img src="assets/icon.png" width="16"> naranja | Clips activos: F9 guarda los últimos segundos |
+| gris | En pausa: no hay ningún juego abierto, no consume nada |
+| 🔴 rojo | Grabando con F8 (al pasar el mouse muestra el tiempo) |
+
+## Teclas
+
+| Tecla | Qué hace |
+|---|---|
+| **F9** | Guarda los últimos segundos como clip |
+| **F8** | Empieza a grabar la pantalla completa / la frena y la guarda |
+| **F10** | Captura de pantalla |
+
+Las teclas se cambian en el menú → Opciones (se pueden combinar con Ctrl, Alt o Shift). Todo se guarda en `Videos\Jugadon`. Al guardar aparece un aviso: tocalo y se abre el archivo.
+
+## Cómo funciona
+
+**Clips (F9).** Para poder guardar "lo que pasó recién", Jugadón va grabando siempre los últimos segundos y tira lo más viejo. **Los clips no se guardan solos:** solo cuando apretás F9. En el menú → **Clips en segundo plano** elegís cuándo funciona esa memoria:
+
+- **Solo mientras juego** (viene así): se activa cuando una ventana tapa toda la pantalla (juego en pantalla completa o "ventana sin bordes") y se pausa cuando volvés al escritorio, 1 minuto después, así un alt-tab rápido no te borra el clip. Jugadón no lee la memoria del juego ni se mete en él: solo mira qué ventana está activa, y Windows le avisa cuando cambia.
+- **Siempre**: funciona todo el tiempo.
+- **Apagado**: no graba nada por su cuenta; solo grabás con F8.
+
+**Grabación (F8).** Graba hasta que la frenás con F8, y queda como `grabacion_….mp4`. Para grabar una sola ventana: menú → **Grabar una ventana** y la elegís de la lista. Mientras grabás con F8, los clips en segundo plano se pausan, así nunca graba dos veces lo mismo. Si se corta la luz o se cuelga la PC, lo grabado se recupera solo la próxima vez que abrís Jugadón.
+
+## Ventana "Mis clips"
+
+Se abre con **clic izquierdo** en el ícono (o con `jugadon.exe --clips`, útil para un acceso directo). Muestra tus clips, grabaciones y capturas con miniatura, del más nuevo al más viejo, y arriba el estado, cuántos archivos hay y cuánto ocupan.
+
+Botones: **Abrir** (también doble clic) · **Compartir…** (WhatsApp, correo, dispositivos cercanos…) · **Copiar** (para pegar con Ctrl+V en Discord o WhatsApp) · **Mostrar en carpeta** · **Eliminar** (va a la papelera) · **Abrir carpeta**.
+
+Está hecha con los controles propios de Windows, sin un navegador por dentro. Solo existe mientras está abierta: **cerrarla con la X la libera entera** y Jugadón sigue en la bandeja. Las miniaturas salen del caché del Explorador de Windows y se cargan de a una con prioridad baja.
+
+## Menú (clic derecho en el ícono)
+
+- **Estado** (arriba de todo): grabando y con qué, en pausa o error.
+- **Ver mis clips…**, **Guardar clip**, **Captura**, **Grabar pantalla completa**, **Grabar una ventana ▸**, **Copiar último clip**.
 - **Clips en segundo plano ▸**: Solo mientras juego / Siempre / Apagado.
-- **Duración del clip**: 15 s, 30 s, 1 min, 2 min o 5 min.
-- **Calidad**:
-  - **Automática** (recomendada, viene así): usa lo justo para tu PC. Si comprime la placa, graba en 720p 30 fps. Si tiene que usar el procesador, baja a 480p 30 fps con un solo hilo.
-  - Si no, la elegís vos: 480p 30 fps (ahorro máximo), 720p 30 fps o 720p 60 fps.
-  - Vale para clips y grabaciones. Una ventana más chica se graba en su tamaño, sin agrandarla.
-- **Opciones**:
-  - **Grabar micrófono**: activado por defecto.
-  - **Sonido al guardar**.
-  - **Usar solo la placa de video**: activado por defecto. Nunca usa el procesador para comprimir.
-  - **Tecla de clip…** / **Tecla de captura…** / **Tecla de grabar/frenar…**: apretá la tecla nueva (se puede combinar con Ctrl, Alt o Shift). Esc cancela.
-  - **Iniciar con Windows**.
-- **Abrir carpeta**.
-- **Salir**.
+- **Duración del clip ▸**: 15 s, 30 s, 1 min, 2 min o 5 min.
+- **Calidad ▸**:
+  - **Automática** (recomendada): 720p 30 fps si comprime la placa; 480p 30 fps si tiene que usar el procesador.
+  - O la elegís: 480p 30 fps (ahorro máximo), 720p 30 fps, 720p 60 fps.
+- **Opciones ▸**: grabar micrófono (activado), sonido al guardar, **usar solo la placa de video** (activado), cambiar teclas, iniciar con Windows.
+- **Abrir carpeta**, **Salir**.
 
 La configuración está en `%APPDATA%\Jugadon\config.ini`. Ahí también se puede cambiar la carpeta de salida (`folder=`).
 
-## Por qué no baja los FPS ni consume
+## Rendimiento: por qué no se siente en el juego
 
-- **En reposo casi ni se despierta.** No pregunta seguido si abriste un juego: Windows le avisa cuando cambiás de ventana. Sin juego, revisa solo cada 10 segundos.
-- **En reposo no hay nada grabando.** Sin juego abierto (o con los clips apagados), ffmpeg ni siquiera está corriendo. Solo queda `jugadon.exe` esperando, y además devuelve su RAM a Windows. Medido en el CI de GitHub (no en una PC gamer): **120 KB** de RAM privada (lo que muestra el Administrador de tareas) y 16 ms de CPU en 25 segundos.
-- **Nunca graba dos cosas a la vez.** Mientras grabás con F8, los clips en segundo plano se pausan.
-- **Todo el video se procesa en la placa de video, no en el procesador.** Captura con Desktop Duplication (`ddagrab`), escala a 720p en la GPU (`scale_d3d11`) y comprime con el chip de video dedicado de la placa: **NVENC** (NVIDIA), **AMF** (AMD) o **QSV** (Intel). Ese chip es aparte de lo que usa el juego para dibujar.
-- **El juego siempre tiene prioridad.** ffmpeg graba con prioridad "debajo de lo normal". Guardar un clip y sacar una captura van con prioridad "baja". Si la CPU está al 100 %, el que cede es el clip (algún cuadro repetido), no el juego.
-- **Guardar no recomprime.** Los últimos segundos están en el disco en pedazos de 2 s (`%TEMP%\jugadon_buf`). Al apretar F9 solo se unen en un `.mp4` (copia directa). Por eso no hay tirón al guardar.
-- **Audio liviano.** El audio se comprime con el modo rápido de AAC, que usa mucho menos procesador. El hilo de audio de Jugadón se despierta 25 veces por segundo y solo copia datos.
-- **Poco trabajo de fondo.** Hay un solo hilo de filtros y un hilo de audio que se despierta cada 40 ms (solo mientras graba). El chequeo de que ffmpeg siga vivo corre cada 2 s.
-- **Nada en RAM.** El buffer está en el disco: ocupa unos 1,5 MB por cada 2 s a 30 fps (unos 230 MB con 5 min) y se borra al salir.
-- Si la GPU no puede codificar, Jugadón pasa solo a otra opción. La última es x264 en CPU, y esa **sí** consume CPU. Si pasa eso, el ícono lo dice.
+- **En reposo no hay nada grabando.** Sin juego abierto, `ffmpeg.exe` ni siquiera corre y Jugadón devuelve su memoria a Windows. Medido en los servidores de GitHub: **108 KB** de RAM y menos de 40 ms de CPU en 25 segundos.
+- **El video lo comprime la placa**, en su chip de video dedicado, aparte de lo que usa el juego para dibujar. La imagen se achica a 720p dentro de la placa y nunca pasa por el procesador.
+- **Usar solo la placa de video** viene activado: si tu placa no puede comprimir, Jugadón no graba y te avisa, en vez de cargar el procesador. Si preferís que grabe igual con el procesador, desactivalo.
+- **Guardar un clip no recomprime nada.** Los últimos segundos están en el disco en pedazos de 2 s y F9 solo los une en un `.mp4`, con prioridad baja. Por eso no hay tirón al guardar.
+- **El juego siempre tiene prioridad**: la grabación corre con prioridad "debajo de lo normal", y guardar o capturar con prioridad "baja".
+- **Audio liviano**: el modo rápido de AAC. Medido: **1,6 % de un núcleo** para el audio y el guardado de pedazos.
+- **Nada de video en la RAM**: el buffer está en el disco, unos 1,5 MB cada 2 s a 30 fps (230 MB con 5 minutos), y se borra al salir.
 
-### PC de bajos recursos (por ejemplo i3-2100 con 4 GB)
+Mientras grabás, el que usa memoria es `ffmpeg.exe` (tiene abierta la captura y el compresor de la placa), como en cualquier programa que grabe la pantalla. Fijate los números reales en el Administrador de tareas: "Jugadón" y "ffmpeg.exe".
 
-Jugadón está pensado para estas PCs. Lo que define si se nota o no es **quién comprime el video**:
+### PCs de bajos recursos (por ejemplo i3-2100 con 4 GB)
 
-| Tu PC | Quién comprime | Qué esperar en 720p 30 fps |
+Lo que define si se nota es **quién comprime el video**. Jugadón prueba solo, en este orden, y se queda con lo más liviano que funcione en tu PC:
+
+| Tu PC | Quién comprime | Qué esperar |
 |---|---|---|
-| Placa con encoder: NVIDIA GTX 600 o más nueva (no la GT 710/1030), AMD con VCE/VCN | El chip de video de la placa, aparte de lo que usa el juego | No deberías notar bajón de FPS |
-| Gráficos Intel con Quick Sync (el i3-2100 lo tiene, HD 2000) | Intel Quick Sync, si el driver lo deja usar | Bajo impacto. Con drivers muy viejos puede no estar disponible |
-| Sin encoder disponible | El procesador (x264 "ultrafast", 2 hilos, prioridad baja) | Funciona, pero en un procesador de 2 núcleos **se nota algo**. Si te molesta, pasá a **480p** |
+| NVIDIA GTX 600 o más nueva (no la GT 710/1030), AMD con VCE/VCN | El chip de video de la placa | No deberías notar bajón de FPS |
+| Gráficos Intel con Quick Sync (el i3-2100 lo trae) | Intel Quick Sync, si el driver lo permite | Bajo impacto. Con drivers muy viejos puede no estar |
+| Ninguno de los anteriores | El procesador, solo si desactivás "Usar solo la placa de video" | 480p 30 fps, un solo hilo, prioridad baja. En 2 núcleos se puede notar algo |
 
-Jugadón prueba solo, en ese orden, y se queda con lo más liviano que funcione en tu PC.
+Si pasás el mouse por el ícono, te dice cuál está usando. Con drivers viejos sin la captura moderna de Windows (por ejemplo Intel HD 2000/3000 en Windows 10), graba por GDI, que funciona en cualquier PC pero usa más procesador.
 
-**Opciones → "Usar solo la placa de video"** viene **activada**. Así Jugadón comprime **solo** con la placa (NVENC, AMF o Quick Sync) y **nunca** usa el procesador para eso. Si tu placa no puede, no graba y te avisa: el juego no pierde nada. Si preferís que grabe igual usando el procesador, desactivala.
+## Problemas comunes
 
-Sobre los "decodificadores": para grabar, la placa **codifica** (comprime) el video. Los decodificadores sirven para **reproducir**, y ahí Windows ya usa la placa solo cuando abrís un clip. Guardar un clip no decodifica ni recodifica nada: solo une los pedazos ya comprimidos. Si pasás el mouse por el ícono, te dice cuál usa; si dice "usa CPU", estás en la última fila.
+- **"Windows protegió su PC"**: Más información → Ejecutar de todas formas.
+- **El ícono queda gris y F9 no guarda nada**: no detectó un juego en pantalla completa. Poné el juego en "pantalla completa" o "ventana sin bordes", o elegí Clips en segundo plano → **Siempre**.
+- **Dice que la placa no puede comprimir**: actualizá el driver de video (NVENC con FFmpeg 8 necesita un driver de NVIDIA reciente). Si tu placa no tiene compresor de video, desactivá Opciones → Usar solo la placa de video.
+- **Otro programa usa F9, F8 o F10**: Jugadón avisa; cambiá la tecla desde Opciones.
+- **Un juego en pantalla completa exclusiva sale negro**: ponelo en "ventana sin bordes".
+- **Cualquier otra cosa**: mirá `%TEMP%\jugadon.log`.
 
-Con drivers viejos (Windows 10 con el driver de Intel HD 2000/3000) puede no estar la captura moderna de Windows. En ese caso graba por **GDI**, que anda en cualquier PC pero carga más la CPU.
+## Límites
 
-Siempre, en cualquier PC:
-- **Clips en segundo plano → Solo mientras juego** (viene así): fuera del juego no corre nada.
-- Guardar un clip **nunca** recomprime: une los pedazos en un mp4, con prioridad baja. No debería trabar el juego.
-- Con 4 GB de RAM: en reposo Jugadón no ocupa casi nada. Mientras graba, el que ocupa RAM es `ffmpeg.exe`; miralo en el Administrador de tareas.
+- Graba el **monitor principal** (o una ventana).
+- "Grabar una ventana" necesita **Windows 10 versión 2004** o más nuevo. Si minimizás la ventana, el video queda congelado hasta que la volvés a mostrar.
+- Audio del sistema y micrófono van mezclados en una sola pista.
+- Sin HDR: con HDR activado los colores pueden salir lavados.
 
-Con **Calidad → Automática** (la de fábrica) Jugadón ya usa lo justo. Para gastar todavía menos, elegí **480p 30 fps**. Evitá 60 fps en PCs lentas: duplica el trabajo de la placa.
+## Desinstalar
 
-**RAM:**
-- **En reposo** (sin juego): solo corre `jugadon.exe`, y apunta a menos de 4 MB.
-- **Mientras grabás**: se suma `ffmpeg.exe`, que tiene abierta la captura y el encoder de la placa. Eso ocupa bastante más que 4 MB, y le pasa a cualquier programa que grabe la pantalla (Medal, ShadowPlay, OBS).
-
-Mirá los números reales en el Administrador de tareas: "Jugadón" y "ffmpeg.exe".
-
-## Límites conocidos
-
-- Solo graba el **monitor principal**.
-- **Grabar una ventana**:
-  - Usa la captura de ventanas de Windows (Windows Graphics Capture), que necesita **Windows 10 versión 2004 o más nuevo**.
-  - Si **minimizás** la ventana, Windows deja de mandar imagen y el video queda congelado hasta que la volvés a mostrar.
-  - Algunos juegos en pantalla completa *exclusiva* no se pueden grabar como ventana. Para esos usá F8 (pantalla completa) o ponelos en "ventana sin bordes".
-- Audio: el **sonido del sistema** y, si lo activás, el **micrófono**, mezclados en una sola pista.
-- Sin HDR. Con HDR activado los colores pueden salir lavados.
-- Algunos juegos en pantalla completa exclusiva no se capturan bien. En ese caso, usá "ventana sin bordes".
-- NVENC con FFmpeg 8 necesita un driver de NVIDIA reciente. Si el tuyo es viejo, Jugadón pasa a otra opción más lenta. Actualizar el driver lo arregla.
-- Si otro programa usa F9 o F10, Jugadón avisa. Cambiá la tecla desde el menú.
-- Si algo falla, mirá `%TEMP%\jugadon.log`.
+1. Menú → Opciones → desmarcá **Iniciar con Windows**, y después menú → **Salir**.
+2. Borrá la carpeta donde descomprimiste Jugadón y `%APPDATA%\Jugadon`.
+3. Tus clips quedan en `Videos\Jugadon` hasta que los borres vos.
 
 ## Compilación
 
-Todo se compila en GitHub Actions (`.github/workflows/release.yml`) cada vez que hay cambios en `main`. El workflow:
-
-- corre los tests (incluida una grabación real con ffmpeg),
-- compila `jugadon.exe` con su ícono,
-- baja FFmpeg 8.1 y verifica que tenga `ddagrab`, `gfxcapture`, `scale_d3d11`, NVENC, AMF, QSV y x264,
-- publica el zip en Releases.
-
-El ícono y el banner se generan con `assets/make_assets.py`.
+Todo se compila en GitHub Actions (`.github/workflows/release.yml`) con cada cambio en `main`. El workflow corre los tests, incluidas grabaciones reales con ffmpeg. Compila `jugadon.exe` con su ícono y baja FFmpeg 8.1, verificando que tenga `ddagrab`, `gfxcapture`, `scale_d3d11`, NVENC, AMF, QSV y x264. Después mide la RAM en reposo, le saca una foto a la ventana "Mis clips" y publica el zip en Releases. El ícono y el banner se generan con `assets/make_assets.py`.
 
 ## Licencias
 
-Jugadón: MIT. `ffmpeg.exe` es FFmpeg (GPLv3). El zip incluye `FFMPEG-LICENCIA.txt`, con la licencia y el link al código fuente.
+Jugadón: MIT. `ffmpeg.exe` es FFmpeg (GPLv3); el zip incluye `FFMPEG-LICENCIA.txt` con la licencia y el link al código fuente.
