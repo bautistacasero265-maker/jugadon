@@ -275,6 +275,30 @@ mod logic {
         }
     }
 
+    /// Quién comprime el video, en palabras: "la placa de video (NVENC)" o "el procesador".
+    pub fn who(enc: usize) -> String {
+        let e = &ENCODERS[enc];
+        if e.codec == "libx264" {
+            "el procesador".to_string()
+        } else {
+            let name = match e.codec {
+                "h264_nvenc" => "NVENC",
+                "h264_amf" => "AMF",
+                "h264_qsv" => "Quick Sync",
+                _ => "vía Windows",
+            };
+            format!("la placa de video ({name})")
+        }
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn who_names() {
+        assert_eq!(who(0), "la placa de video (NVENC)");
+        assert_eq!(who(6), "la placa de video (vía Windows)");
+        assert_eq!(who(11), "el procesador");
+    }
+
     pub fn bitrate_kbit(height: u32, fps: u32) -> u32 {
         match (height >= 720, fps >= 60) {
             (true, true) => 9000,
@@ -1436,7 +1460,7 @@ mod app {
         fn status(&self) -> String {
             if let Some(m) = &self.manual {
                 let a = if m.audio { "" } else { ", sin audio" };
-                return format!("● Grabando {} – {}{a}", m.what, logic::fmt_elapsed(m.t0.elapsed().as_secs()));
+                return format!("● Grabando {} – {}{a}\ncon {}", m.what, logic::fmt_elapsed(m.t0.elapsed().as_secs()), logic::who(m.enc));
             }
             if self.probing && self.rec.child.is_none() {
                 return "Buscando la mejor forma de grabar en esta PC…".to_string();
@@ -1452,8 +1476,7 @@ mod app {
                 } else {
                     ""
                 };
-                let cpu = if ENCODERS[self.rec.enc].codec == "libx264" { " – sin encoder de placa: usa CPU" } else { "" };
-                format!("Grabando ({}{audio}){cpu}", ENCODERS[self.rec.enc].label)
+                format!("Clips activos{audio}\ncon {}", logic::who(self.rec.enc))
             } else if self.rec.gave_up {
                 if self.cfg.gpu_only {
                     "Sin grabar: la placa no puede comprimir (ver Opciones)".to_string()
@@ -1666,10 +1689,11 @@ mod app {
             self.play_sound();
             let name = format!("grabacion_{}.mp4", now_stamp());
             let dur = logic::fmt_elapsed(m.t0.elapsed().as_secs());
+            let who = logic::who(m.enc);
             let msg = if cut {
-                format!("La grabación se cortó; se guardó lo grabado ({dur}): {name}")
+                format!("La grabación se cortó; se guardó lo grabado ({dur}, con {who}): {name}")
             } else {
-                format!("Grabación guardada ({dur}): {name}")
+                format!("Grabación guardada ({dur}, con {who}): {name}")
             };
             remux_in_background(self.ffmpeg.clone(), self.log_path.clone(), m.ts, dir.join(name), msg);
             self.last_trim = None;
@@ -1993,6 +2017,7 @@ mod app {
                 return;
             };
             let name = format!("clip_{}.mp4", now_stamp());
+            let who = logic::who(self.rec.enc);
             let out = dir.join(&name).to_string_lossy().into_owned();
             let args = logic::clip_args(&segs, &out);
             self.play_sound();
@@ -2002,7 +2027,7 @@ mod app {
                 cmd.args(&args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(log_stdio(&log));
                 let ok = spawn_hidden(&mut cmd, IDLE).and_then(|mut c| c.wait()).is_ok_and(|s| s.success());
                 if ok {
-                    post_text(format!("Clip guardado: {name}\nClic acá para verlo."), Some(out));
+                    post_text(format!("Clip guardado (con {who}): {name}\nClic acá para verlo."), Some(out));
                 } else {
                     post_text("No se pudo guardar el clip. Mirá %TEMP%\\jugadon.log".into(), None);
                 }
