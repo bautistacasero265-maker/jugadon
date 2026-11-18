@@ -1,8 +1,9 @@
-rclip - clips de juegos desde la bandeja del sistema
-====================================================
+Jugadón - guardá tus jugadas con una tecla
+==========================================
 
-1. Dejá rclip.exe y ffmpeg.exe juntos en la misma carpeta.
-2. Abrí rclip.exe. Aparece un punto rojo en la bandeja, al lado del reloj.
+1. Dejá jugadon.exe y ffmpeg.exe juntos en la misma carpeta.
+2. Abrí jugadon.exe. Aparece el ícono de Jugadón (play naranja) en la
+   bandeja, al lado del reloj. Si no lo ves, tocá la flechita ^.
    Si SmartScreen avisa: "Más información" -> "Ejecutar de todas formas"
    (el exe no está firmado).
 
@@ -10,9 +11,9 @@ Teclas por defecto:
   F9   guarda los últimos 30 segundos como clip (.mp4)
   F10  saca una captura de pantalla (.png)
 
-Los archivos van a: %USERPROFILE%\Videos\rclip
+Los archivos van a: %USERPROFILE%\Videos\Jugadon
 
-Clic en el punto rojo para abrir el menú. Ahí podés:
+Clic en el ícono para abrir el menú. Ahí podés:
   - cambiar la duración (15 s a 5 min)
   - cambiar la calidad (720p 30 o 60 fps)
   - cambiar las teclas
@@ -21,7 +22,7 @@ Clic en el punto rojo para abrir el menú. Ahí podés:
   - salir
 
 Graba la pantalla principal y el sonido del sistema. No graba el micrófono.
-Si algo no anda, mirá %TEMP%\rclip.log
-Configuración: %APPDATA%\rclip\config.ini
+Si algo no anda, mirá %TEMP%\jugadon.log
+Configuración: %APPDATA%\Jugadon\config.ini
 
 Más info: https://github.com/bautistacasero265-maker/app-clips

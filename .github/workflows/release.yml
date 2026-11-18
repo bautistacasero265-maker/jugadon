@@ -2,7 +2,7 @@ name: build-y-release
 
 on:
   push:
-    branches: [main, "claude/**"]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -72,8 +72,11 @@ jobs:
       - name: Compilar
         run: |
           cargo build --release
-          $exe = Get-Item target\release\rclip.exe
-          Write-Host ("rclip.exe: {0:N0} bytes" -f $exe.Length)
+          $exe = Get-Item target\release\jugadon.exe
+          Write-Host ("jugadon.exe: {0:N0} bytes" -f $exe.Length)
+          $desc = $exe.VersionInfo.FileDescription
+          Write-Host "FileDescription: $desc"
+          if ($desc -ne "Jugadón") { throw "No se embebieron el ícono/recursos en el exe" }
 
       - name: Prueba informativa de ddagrab en el runner (sin GPU; puede fallar)
         continue-on-error: true
@@ -84,13 +87,13 @@ jobs:
 
       - name: Armar zip
         run: |
-          New-Item -ItemType Directory rclip | Out-Null
-          Copy-Item target\release\rclip.exe rclip\
-          Copy-Item ffmpeg\bin\ffmpeg.exe rclip\
-          Copy-Item dist\LEEME.txt rclip\
+          New-Item -ItemType Directory Jugadon | Out-Null
+          Copy-Item target\release\jugadon.exe Jugadon\
+          Copy-Item ffmpeg\bin\ffmpeg.exe Jugadon\
+          Copy-Item dist\LEEME.txt Jugadon\
           $lic = Get-ChildItem ffmpeg -File | Where-Object { $_.Name -match 'LICENSE' } | Select-Object -First 1
           $notice = @"
-          rclip incluye ffmpeg.exe $env:FFMPEG_VERSION (build "essentials" de gyan.dev),
+          Jugadón incluye ffmpeg.exe $env:FFMPEG_VERSION (build "essentials" de gyan.dev),
           licenciado bajo la GNU General Public License v3 (GPLv3).
 
           Código fuente de FFmpeg: https://ffmpeg.org/download.html
@@ -103,27 +106,27 @@ jobs:
           "@
           $text = $notice
           if ($lic) { $text += "`r`n" + (Get-Content $lic.FullName -Raw) }
-          Set-Content -Path rclip\FFMPEG-LICENCIA.txt -Value $text -Encoding utf8
-          Compress-Archive -Path rclip -DestinationPath rclip-windows-x64.zip
-          Get-ChildItem rclip | Format-Table Name, Length
-          Write-Host ("zip: {0:N0} bytes" -f (Get-Item rclip-windows-x64.zip).Length)
+          Set-Content -Path Jugadon\FFMPEG-LICENCIA.txt -Value $text -Encoding utf8
+          Compress-Archive -Path Jugadon -DestinationPath Jugadon-windows-x64.zip
+          Get-ChildItem Jugadon | Format-Table Name, Length
+          Write-Host ("zip: {0:N0} bytes" -f (Get-Item Jugadon-windows-x64.zip).Length)
 
       - uses: actions/upload-artifact@v4
         with:
-          name: rclip-windows-x64
-          path: rclip-windows-x64.zip
+          name: Jugadon-windows-x64
+          path: Jugadon-windows-x64.zip
 
       - name: Publicar release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.1.${{ github.run_number }}
-          name: rclip v0.1.${{ github.run_number }}
+          tag_name: v0.2.${{ github.run_number }}
+          name: Jugadón v0.2.${{ github.run_number }}
           target_commitish: ${{ github.sha }}
           prerelease: ${{ github.ref_name != github.event.repository.default_branch }}
-          files: rclip-windows-x64.zip
+          files: Jugadon-windows-x64.zip
           body: |
-            Bajá **rclip-windows-x64.zip**, descomprimilo en una carpeta y abrí `rclip.exe`.
-            Aparece un punto rojo en la bandeja (al lado del reloj). F9 guarda el clip, F10 saca captura.
+            Bajá **Jugadon-windows-x64.zip**, descomprimilo en una carpeta y abrí `jugadon.exe`.
+            Aparece el ícono de Jugadón (play naranja) en la bandeja, al lado del reloj. **F9** guarda el clip, **F10** saca captura.
             Instrucciones completas en el README del repo y en LEEME.txt dentro del zip.
 
             Compilado desde el commit ${{ github.sha }} (rama `${{ github.ref_name }}`).

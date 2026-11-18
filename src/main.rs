@@ -1,4 +1,4 @@
-// rclip: clips de juegos desde la bandeja del sistema.
+// Jugadón: clips de juegos desde la bandeja del sistema.
 // La captura y el encode los hace ffmpeg.exe (ddagrab + encoder por hardware);
 // este proceso solo maneja la bandeja, las teclas, el audio del sistema y el watchdog.
 #![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
@@ -165,7 +165,8 @@ mod logic {
     pub fn record_args(enc: usize, fps: u32, secs: u32, audio: Option<(u32, u16)>, dir: &str) -> Vec<String> {
         let e = &ENCODERS[enc];
         let br = bitrate_mbit(fps);
-        let mut a = s(&["-hide_banner", "-loglevel", "warning", "-nostats"]);
+        // un solo hilo de filtros: todo el trabajo pesado está en la GPU
+        let mut a = s(&["-hide_banner", "-loglevel", "warning", "-nostats", "-filter_threads", "1"]);
         if audio.is_none() {
             a.push("-nostdin".into());
         }
@@ -232,7 +233,7 @@ mod logic {
             "-update",
             "1",
             "-compression_level",
-            "3",
+            "1",
             out,
         ])
     }
@@ -268,7 +269,7 @@ mod logic {
             c.fps = 60;
             c.clip = Hotkey { vk: 0x41, mods: MOD_CONTROL | MOD_SHIFT };
             c.encoder = 3;
-            c.folder = "D:\\Mis clips\\rclip".into();
+            c.folder = "D:\\Mis clips\\Jugadon".into();
             assert_eq!(Config::parse(&c.serialize(), "C:\\y".into()), c);
         }
 
@@ -314,13 +315,14 @@ mod logic {
 
         #[test]
         fn record_args_gpu_with_audio() {
-            let a = record_args(0, 60, 30, Some((48000, 2)), "C:\\T\\rclip_buf").join(" ");
+            let a = record_args(0, 60, 30, Some((48000, 2)), "C:\\T\\jugadon_buf").join(" ");
             assert!(a.contains("-f lavfi -i ddagrab=framerate=60:draw_mouse=1"));
+            assert!(a.starts_with("-hide_banner -loglevel warning -nostats -filter_threads 1 -f lavfi"));
             assert!(a.contains("-thread_queue_size 1024 -probesize 32 -analyzeduration 0 -f f32le -ar 48000 -ac 2 -i pipe:0 -map 0:v -map 1:a"));
             assert!(a.contains("-vf scale_d3d11=width=-2:height=720:format=nv12 -c:v h264_nvenc -preset p1 -tune ll -rc cbr"));
             assert!(a.contains("-b:v 9M -maxrate 9M -bufsize 18M -g 120 -bf 0"));
             assert!(a.contains("-c:a aac -b:a 160k"));
-            assert!(a.ends_with("-f segment -segment_time 2 -segment_wrap 20 -segment_format mpegts C:\\T\\rclip_buf\\seg%03d.ts"));
+            assert!(a.ends_with("-f segment -segment_time 2 -segment_wrap 20 -segment_format mpegts C:\\T\\jugadon_buf\\seg%03d.ts"));
             assert!(!a.contains("-nostdin"));
             assert!(!a.contains("reset_timestamps"));
         }
@@ -376,7 +378,7 @@ mod win_tests {
             eprintln!("RCLIP_FFMPEG no definido: se saltea");
             return;
         };
-        let dir = std::env::temp_dir().join("rclip_test_buf");
+        let dir = std::env::temp_dir().join("jugadon_test_buf");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let mut args = logic::record_args(6, 30, 6, Some((48000, 2)), &dir.to_string_lossy());
@@ -423,7 +425,7 @@ mod win_tests {
         let segs = logic::select_segments(files, 6);
         eprintln!("segmentos: {segs:?}");
         assert!(segs.len() >= 3, "pocos segmentos: {segs:?}");
-        let out = std::env::temp_dir().join("rclip_test_clip.mp4").to_string_lossy().into_owned();
+        let out = std::env::temp_dir().join("jugadon_test_clip.mp4").to_string_lossy().into_owned();
         let st = Command::new(&ff).args(logic::clip_args(&segs, &out)).status().unwrap();
         let _ = child.kill();
         let _ = child.wait();
@@ -451,7 +453,7 @@ fn main() {
 
 #[cfg(not(windows))]
 fn main() {
-    eprintln!("rclip solo funciona en Windows");
+    eprintln!("Jugadón solo funciona en Windows");
 }
 
 #[cfg(windows)]
@@ -483,7 +485,9 @@ mod app {
     const WM_DONE: u32 = WM_APP + 2;
     const WM_BIND: u32 = WM_APP + 3;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    // El juego siempre gana la CPU: grabar en "debajo de lo normal", guardar/capturar en "baja".
     const BELOW_NORMAL: u32 = 0x0000_4000;
+    const IDLE: u32 = 0x0000_0040;
     const TIMER_WATCHDOG: usize = 1;
     const TIMER_BIND: usize = 2;
     const RUN_KEY: PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
@@ -544,7 +548,7 @@ mod app {
     fn log_line(path: &Path, msg: &str) {
         if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(path) {
             let t = now_stamp();
-            let _ = writeln!(f, "[rclip {t}] {msg}");
+            let _ = writeln!(f, "[jugadon {t}] {msg}");
         }
     }
 
@@ -560,7 +564,7 @@ mod app {
         }
     }
 
-    /// Lanza un proceso sin ventana y lo mete en el Job (muere si rclip muere).
+    /// Lanza un proceso sin ventana y lo mete en el Job (muere si Jugadón muere).
     fn spawn_hidden(cmd: &mut Command, flags: u32) -> std::io::Result<Child> {
         let child = cmd.creation_flags(CREATE_NO_WINDOW | flags).spawn()?;
         let job = JOB.load(Ordering::Relaxed);
@@ -616,7 +620,7 @@ mod app {
                 "iniciando…".to_string()
             };
             let audio = if self.rec.child.is_some() && !self.rec.audio { ", sin audio" } else { "" };
-            format!("rclip – {state}{audio}\n720p {} fps · últimos {} s", self.cfg.fps, self.cfg.secs)
+            format!("Jugadón – {state}{audio}\n720p {} fps · últimos {} s", self.cfg.fps, self.cfg.secs)
         }
 
         fn add_icon(&self) {
@@ -642,7 +646,7 @@ mod app {
         fn notify(&self, msg: &str, warn: bool) {
             let mut n = self.nid();
             n.uFlags = NIF_INFO;
-            copy_wide(&mut n.szInfoTitle, "rclip");
+            copy_wide(&mut n.szInfoTitle, "Jugadón");
             copy_wide(&mut n.szInfo, msg);
             n.dwInfoFlags = (if warn { NIIF_WARNING } else { NIIF_INFO }) | NIIF_NOSOUND | NIIF_RESPECT_QUIET_TIME;
             unsafe {
@@ -719,7 +723,7 @@ mod app {
             self.rec.started = Instant::now();
             self.rec.next_try = None;
             self.rec.audio = feed.is_some();
-            match spawn_hidden(&mut cmd, 0) {
+            match spawn_hidden(&mut cmd, BELOW_NORMAL) {
                 Ok(child) => {
                     self.rec.child = Some(child);
                     if let Some((a, w)) = feed {
@@ -786,7 +790,7 @@ mod app {
                     if self.rec.tried >= ENCODERS.len() {
                         self.rec.gave_up = true;
                         log_line(&self.log_path, "ningún encoder funcionó");
-                        self.notify("No pude iniciar la grabación con ningún encoder. Mirá %TEMP%\\rclip.log", true);
+                        self.notify("No pude iniciar la grabación con ningún encoder. Mirá %TEMP%\\jugadon.log", true);
                         self.update_tip();
                         return;
                     }
@@ -809,7 +813,7 @@ mod app {
 
         fn save_clip(&self) {
             if self.rec.child.is_none() {
-                self.notify("No está grabando todavía. Mirá %TEMP%\\rclip.log", true);
+                self.notify("No está grabando todavía. Mirá %TEMP%\\jugadon.log", true);
                 return;
             }
             let mut files = Vec::new();
@@ -843,8 +847,8 @@ mod app {
             std::thread::spawn(move || {
                 let mut cmd = Command::new(ffmpeg);
                 cmd.args(&args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(log_stdio(&log));
-                let ok = spawn_hidden(&mut cmd, BELOW_NORMAL).and_then(|mut c| c.wait()).is_ok_and(|s| s.success());
-                post_text(if ok { format!("Clip guardado: {name}") } else { "No se pudo guardar el clip. Mirá %TEMP%\\rclip.log".into() });
+                let ok = spawn_hidden(&mut cmd, IDLE).and_then(|mut c| c.wait()).is_ok_and(|s| s.success());
+                post_text(if ok { format!("Clip guardado: {name}") } else { "No se pudo guardar el clip. Mirá %TEMP%\\jugadon.log".into() });
             });
         }
 
@@ -860,8 +864,8 @@ mod app {
             std::thread::spawn(move || {
                 let mut cmd = Command::new(ffmpeg);
                 cmd.args(&args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(log_stdio(&log));
-                let ok = spawn_hidden(&mut cmd, BELOW_NORMAL).and_then(|mut c| c.wait()).is_ok_and(|s| s.success());
-                post_text(if ok { format!("Captura guardada: {name}") } else { "No se pudo sacar la captura. Mirá %TEMP%\\rclip.log".into() });
+                let ok = spawn_hidden(&mut cmd, IDLE).and_then(|mut c| c.wait()).is_ok_and(|s| s.success());
+                post_text(if ok { format!("Captura guardada: {name}") } else { "No se pudo sacar la captura. Mirá %TEMP%\\jugadon.log".into() });
             });
         }
 
@@ -1008,7 +1012,7 @@ mod app {
         unsafe {
             let mut buf = [0u16; 1024];
             let mut len = (buf.len() * 2) as u32;
-            let r = RegGetValueW(HKEY_CURRENT_USER, RUN_KEY, w!("rclip"), RRF_RT_REG_SZ, None, Some(buf.as_mut_ptr() as _), Some(&mut len));
+            let r = RegGetValueW(HKEY_CURRENT_USER, RUN_KEY, w!("Jugadon"), RRF_RT_REG_SZ, None, Some(buf.as_mut_ptr() as _), Some(&mut len));
             if r.is_ok() {
                 let n = buf.iter().position(|&c| c == 0).unwrap_or(0);
                 Some(String::from_utf16_lossy(&buf[..n]))
@@ -1026,9 +1030,9 @@ mod app {
         unsafe {
             if on {
                 let v = wide(&exe_cmdline());
-                let _ = RegSetKeyValueW(HKEY_CURRENT_USER, RUN_KEY, w!("rclip"), REG_SZ.0, Some(v.as_ptr() as _), (v.len() * 2) as u32);
+                let _ = RegSetKeyValueW(HKEY_CURRENT_USER, RUN_KEY, w!("Jugadon"), REG_SZ.0, Some(v.as_ptr() as _), (v.len() * 2) as u32);
             } else {
-                let _ = RegDeleteKeyValueW(HKEY_CURRENT_USER, RUN_KEY, w!("rclip"));
+                let _ = RegDeleteKeyValueW(HKEY_CURRENT_USER, RUN_KEY, w!("Jugadon"));
             }
         }
     }
@@ -1139,6 +1143,15 @@ mod app {
         }
     }
 
+    /// Ícono del exe (recurso 1); si no está, un punto de color generado.
+    unsafe fn load_icon(hinst: HINSTANCE) -> HICON {
+        let size = GetSystemMetrics(SM_CXSMICON);
+        match LoadImageW(Some(hinst), PCWSTR(1 as *const u16), IMAGE_ICON, size, size, LR_DEFAULTCOLOR) {
+            Ok(h) if !h.is_invalid() => HICON(h.0),
+            _ => make_icon(),
+        }
+    }
+
     unsafe fn make_icon() -> HICON {
         let size = GetSystemMetrics(SM_CXSMICON).clamp(16, 64);
         let px = logic::dot_pixels(size as usize);
@@ -1155,7 +1168,7 @@ mod app {
     fn message_box(text: &str) {
         let t = wide(text);
         unsafe {
-            MessageBoxW(None, PCWSTR(t.as_ptr()), w!("rclip"), MB_OK | MB_ICONWARNING);
+            MessageBoxW(None, PCWSTR(t.as_ptr()), w!("Jugadón"), MB_OK | MB_ICONWARNING);
         }
     }
 
@@ -1180,44 +1193,49 @@ mod app {
 
     pub fn run() {
         unsafe {
-            let _mutex = CreateMutexW(None, true, w!("Local\\rclip_single_instance"));
+            let _mutex = CreateMutexW(None, true, w!("Local\\jugadon_single_instance"));
             if GetLastError() == ERROR_ALREADY_EXISTS {
-                message_box("rclip ya está abierto (mirá la bandeja del sistema, al lado del reloj).");
+                message_box("Jugadón ya está abierto (mirá la bandeja del sistema, al lado del reloj).");
                 return;
             }
 
             let exe_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf)).unwrap_or_default();
             let ffmpeg = exe_dir.join("ffmpeg.exe");
             if !ffmpeg.exists() {
-                message_box("Falta ffmpeg.exe al lado de rclip.exe. Descomprimí el zip completo en una carpeta.");
+                message_box("Falta ffmpeg.exe al lado de jugadon.exe. Descomprimí el zip completo en una carpeta.");
                 return;
             }
             let temp = std::env::temp_dir();
-            let log_path = temp.join("rclip.log");
+            let log_path = temp.join("jugadon.log");
             if fs::metadata(&log_path).is_ok_and(|m| m.len() > 1_000_000) {
                 let _ = File::create(&log_path);
             }
             log_line(&log_path, "inicio");
-            let cfg_path = env_path("APPDATA", ".").join("rclip").join("config.ini");
-            let default_folder = env_path("USERPROFILE", ".").join("Videos").join("rclip").to_string_lossy().into_owned();
-            let cfg = match fs::read_to_string(&cfg_path) {
+            let appdata = env_path("APPDATA", ".");
+            let cfg_path = appdata.join("Jugadon").join("config.ini");
+            // config de la versión anterior (rclip), si existe
+            let old_cfg = appdata.join("rclip").join("config.ini");
+            let default_folder = env_path("USERPROFILE", ".").join("Videos").join("Jugadon").to_string_lossy().into_owned();
+            let cfg = match fs::read_to_string(&cfg_path).or_else(|_| fs::read_to_string(&old_cfg)) {
                 Ok(t) => Config::parse(&t, default_folder),
                 Err(_) => Config::defaults(default_folder),
             };
             let _ = fs::create_dir_all(&cfg.folder);
             make_job();
 
-            // si el autoarranque apunta a otra ruta (movieron la carpeta), lo actualizamos
-            if autostart_value().is_some_and(|v| v != exe_cmdline()) {
+            // si el autoarranque apunta a otra ruta (movieron la carpeta), lo actualizamos;
+            // y si estaba el de la versión anterior (rclip), lo pasamos al nombre nuevo
+            let old_run = RegDeleteKeyValueW(HKEY_CURRENT_USER, RUN_KEY, w!("rclip")).is_ok();
+            if old_run || autostart_value().is_some_and(|v| v != exe_cmdline()) {
                 set_autostart(true);
             }
 
             let hinst = GetModuleHandleW(None).unwrap_or_default();
-            let class = w!("rclip_tray");
+            let class = w!("jugadon_tray");
             let wc = WNDCLASSW { lpfnWndProc: Some(wndproc), hInstance: hinst.into(), lpszClassName: class, ..Default::default() };
             RegisterClassW(&wc);
             TASKBAR_CREATED.store(RegisterWindowMessageW(w!("TaskbarCreated")), Ordering::Relaxed);
-            let Ok(hwnd) = CreateWindowExW(WS_EX_TOOLWINDOW, class, w!("rclip"), WS_POPUP, 0, 0, 0, 0, None, None, Some(hinst.into()), None) else {
+            let Ok(hwnd) = CreateWindowExW(WS_EX_TOOLWINDOW, class, w!("Jugadón"), WS_POPUP, 0, 0, 0, 0, None, None, Some(hinst.into()), None) else {
                 return;
             };
             MAIN_HWND.store(hwnd.0 as isize, Ordering::Relaxed);
@@ -1228,9 +1246,9 @@ mod app {
                 cfg,
                 cfg_path,
                 ffmpeg,
-                buf_dir: temp.join("rclip_buf"),
+                buf_dir: temp.join("jugadon_buf"),
                 log_path,
-                icon: make_icon(),
+                icon: load_icon(hinst.into()),
                 rec: Rec {
                     child: None,
                     enc,
@@ -1442,7 +1460,7 @@ mod audio {
         let mut last_check = Instant::now();
 
         loop {
-            thread::sleep(Duration::from_millis(10));
+            thread::sleep(Duration::from_millis(20));
 
             // cambio de dispositivo por defecto / dispositivo inválido
             if last_check.elapsed() >= Duration::from_secs(1) {
@@ -1468,10 +1486,10 @@ mod audio {
             // mantener el audio pegado al reloj de pared
             let target = t0.elapsed().as_micros() as u64 * rate as u64 / 1_000_000;
             let have = written + (pending.len() / chs) as u64;
-            if have + ms(40) < target {
+            if have + ms(60) < target {
                 // loopback no manda nada cuando hay silencio: rellenamos
                 pending.resize(pending.len() + (target - have) as usize * chs, 0.0);
-            } else if have > target + ms(50) {
+            } else if have > target + ms(80) {
                 let drop = ((have - target) as usize * chs).min(pending.len());
                 pending.drain(..drop);
             }

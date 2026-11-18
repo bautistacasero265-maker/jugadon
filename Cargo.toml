@@ -1,13 +1,17 @@
 [package]
-name = "rclip"
-version = "0.1.0"
+name = "jugadon"
+version = "0.2.0"
 edition = "2021"
-description = "Clips de juegos desde la bandeja del sistema (Windows)"
+description = "Jugadón: clips de juegos desde la bandeja del sistema (Windows)"
+build = "build.rs"
 license = "MIT"
 
 [[bin]]
-name = "rclip"
+name = "jugadon"
 path = "src/main.rs"
+
+[build-dependencies]
+embed-resource = "3"
 
 [target.'cfg(windows)'.dependencies.windows]
 version = "0.62"
