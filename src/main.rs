@@ -42,6 +42,12 @@ mod logic {
         pub gpu_only: bool,
         /// versión en la que se probó cómo grabar (vacío = falta probar)
         pub probed: String,
+        /// 0 tin-tin, 1 suave, 2 moneda
+        pub sound_style: u32,
+        /// borrar solos los clips de más de N días (0 = nunca)
+        pub keep_days: u32,
+        /// borrar los más viejos si la carpeta pasa de N GB (0 = sin límite)
+        pub max_gb: u32,
     }
 
     impl Config {
@@ -60,6 +66,9 @@ mod logic {
                 sound: true,
                 gpu_only: true,
                 probed: String::new(),
+                sound_style: 0,
+                keep_days: 0,
+                max_gb: 0,
             }
         }
 
@@ -95,6 +104,9 @@ mod logic {
                     ("sound", Some(n)) if n <= 1 => c.sound = n == 1,
                     ("gpu_only", Some(n)) if n <= 1 && v4 => c.gpu_only = n == 1,
                     ("probed", _) if v4 => c.probed = v.to_string(),
+                    ("sound_style", Some(n)) if n <= 2 => c.sound_style = n,
+                    ("keep_days", Some(n)) if n <= 3650 => c.keep_days = n,
+                    ("max_gb", Some(n)) if n <= 10_000 => c.max_gb = n,
                     _ => {}
                 }
             }
@@ -108,7 +120,7 @@ mod logic {
 
         pub fn serialize(&self) -> String {
             format!(
-                "version=4\nseconds={}\nfps={}\nquality={}\nclip_key={}\nclip_mods={}\nshot_key={}\nshot_mods={}\nfolder={}\nencoder={}\nbg={}\nrec_key={}\nrec_mods={}\nmic={}\nsound={}\ngpu_only={}\nprobed={}\n",
+                "version=4\nseconds={}\nfps={}\nquality={}\nclip_key={}\nclip_mods={}\nshot_key={}\nshot_mods={}\nfolder={}\nencoder={}\nbg={}\nrec_key={}\nrec_mods={}\nmic={}\nsound={}\ngpu_only={}\nprobed={}\nsound_style={}\nkeep_days={}\nmax_gb={}\n",
                 self.secs,
                 self.fps,
                 self.height,
@@ -124,7 +136,10 @@ mod logic {
                 self.mic as u8,
                 self.sound as u8,
                 self.gpu_only as u8,
-                self.probed
+                self.probed,
+                self.sound_style,
+                self.keep_days,
+                self.max_gb
             )
         }
     }
@@ -432,10 +447,83 @@ mod logic {
         s(&["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-sseof", &from, "-i", input, "-map", "0", "-c", "copy", "-avoid_negative_ts", "make_zero", "-movflags", "+faststart", out])
     }
 
-    /// "clip_2026-11-18_22-21-15.mp4" -> "clip_2026-11-18_22-21-15_ultimos15s.mp4"
-    pub fn trimmed_name(name: &str, secs: u32) -> String {
+    /// Sacar los primeros `secs` segundos sin recomprimir.
+    pub fn trim_start_args(input: &str, secs: u32, out: &str) -> Vec<String> {
+        let from = secs.to_string();
+        s(&["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-ss", &from, "-i", input, "-map", "0", "-c", "copy", "-avoid_negative_ts", "make_zero", "-movflags", "+faststart", out])
+    }
+
+    /// Nombre de una copia: "clip_X.mp4" + "sin10s" -> "clip_X_sin10s.mp4" (el título personalizado se mantiene al final).
+    pub fn derived_name(name: &str, tag: &str) -> String {
         let stem = name.rsplit_once('.').map_or(name, |x| x.0);
-        format!("{stem}_ultimos{secs}s.mp4")
+        match stem.split_once(" - ") {
+            Some((base, custom)) => format!("{base}_{tag} - {custom}.mp4"),
+            None => format!("{stem}_{tag}.mp4"),
+        }
+    }
+
+    /// Para Discord (máx. 10 MB): (alto, kbit/s de video) según la duración.
+    pub fn discord_plan(dur_secs: u32) -> (u32, u32) {
+        // 9,5 MB de margen, menos 96 kbit/s de audio y ~4 % del contenedor
+        let total = 9.5 * 1024.0 * 1024.0 * 8.0 / 1000.0;
+        let v = (total * 0.96 / dur_secs.max(1) as f64 - 96.0).clamp(150.0, 6000.0) as u32;
+        let h = if v >= 2000 {
+            720
+        } else if v >= 900 {
+            480
+        } else {
+            360
+        };
+        (h, v)
+    }
+
+    /// Recomprimir para Discord con la misma forma de comprimir que anda en esta PC (la placa, si se puede).
+    pub fn discord_args(enc: usize, input: &str, dur_secs: u32, out: &str) -> Vec<String> {
+        let e = &ENCODERS[enc];
+        let (h, v) = discord_plan(dur_secs);
+        let mut a = s(&["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-hwaccel", "auto", "-i", input, "-map", "0:v:0", "-map", "0:a?", "-vf"]);
+        a.push(format!("scale=-2:min({h}\\,trunc(ih/2)*2):flags=bicubic,format=nv12"));
+        a.extend(s(&["-r", "30", "-c:v", e.codec]));
+        a.extend(s(e.opts));
+        a.extend(["-b:v".into(), format!("{v}k"), "-maxrate".into(), format!("{v}k"), "-bufsize".into(), format!("{}k", v * 2)]);
+        a.extend(s(&["-g", "60", "-bf", "0", "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", out]));
+        a
+    }
+
+    /// Nombre nuevo al renombrar: se conserva el tipo y la fecha ("clip_AAAA-…") y se agrega el título.
+    /// Devuelve None si el texto queda vacío.
+    pub fn renamed(name: &str, text: &str) -> Option<String> {
+        let (stem, ext) = name.rsplit_once('.').unwrap_or((name, "mp4"));
+        let base = stem.split_once(" - ").map_or(stem, |x| x.0);
+        let clean: String = text.chars().filter(|c| !"\\/:*?\"<>|".contains(*c) && !c.is_control()).collect();
+        let clean: String = clean.trim().trim_end_matches('.').chars().take(60).collect();
+        (!clean.is_empty()).then(|| format!("{base} - {clean}.{ext}"))
+    }
+
+    /// Título puesto por el usuario ("clip_… - ace en Valorant.mp4" -> "ace en Valorant").
+    pub fn custom_title(name: &str) -> Option<&str> {
+        let stem = name.rsplit_once('.').map_or(name, |x| x.0);
+        stem.split_once(" - ").map(|x| x.1).filter(|t| !t.is_empty())
+    }
+
+    /// Limpieza automática. files: (nombre, días de antigüedad, bytes, favorito), en cualquier orden.
+    /// Devuelve qué borrar: lo de más de `keep_days` días y, si la carpeta pasa de `max_gb`, los más viejos.
+    /// Los favoritos y lo de hoy nunca se borran.
+    pub fn cleanup_plan(mut files: Vec<(String, u32, u64, bool)>, keep_days: u32, max_gb: u32) -> Vec<String> {
+        files.sort_by_key(|f| std::cmp::Reverse(f.1)); // más viejos primero
+        let mut del = Vec::new();
+        let mut total: u64 = files.iter().map(|f| f.2).sum();
+        let limit = max_gb as u64 * (1 << 30);
+        for (name, age, size, fav) in files {
+            if fav || age == 0 {
+                continue;
+            }
+            if (keep_days > 0 && age > keep_days) || (max_gb > 0 && total > limit) {
+                total -= size;
+                del.push(name);
+            }
+        }
+        del
     }
 
     /// "1:05:09" / "3:07"
@@ -544,15 +632,21 @@ mod logic {
     }
 
     /// Sonido corto de "clip guardado" (WAV 16 bit mono en memoria, ~7 KB).
-    pub fn clip_sound_wav() -> Vec<u8> {
+    /// Sonido al guardar (WAV en memoria): 0 tin-tin, 1 suave, 2 moneda.
+    pub fn clip_sound_wav(style: u32) -> Vec<u8> {
         let rate = 22050u32;
         let mut pcm: Vec<i16> = Vec::new();
-        for (freq, ms) in [(880.0f32, 70u32), (1318.5, 110)] {
+        let (notes, vol): (&[(f32, u32)], f32) = match style {
+            1 => (&[(659.3, 160)], 0.22),
+            2 => (&[(987.8, 60), (1318.5, 190)], 0.3),
+            _ => (&[(880.0, 70), (1318.5, 110)], 0.35),
+        };
+        for &(freq, ms) in notes {
             let n = rate * ms / 1000;
             for i in 0..n {
                 let t = i as f32 / rate as f32;
                 let env = (i as f32 / 200.0).min(1.0) * (1.0 - i as f32 / n as f32).powf(1.5);
-                pcm.push(((t * freq * std::f32::consts::TAU).sin() * env * 0.35 * 32767.0) as i16);
+                pcm.push(((t * freq * std::f32::consts::TAU).sin() * env * vol * 32767.0) as i16);
             }
         }
         let data_len = (pcm.len() * 2) as u32;
@@ -725,7 +819,8 @@ mod logic {
 
         #[test]
         fn clip_sound() {
-            let w = clip_sound_wav();
+            let w = clip_sound_wav(0);
+            assert!(clip_sound_wav(1).len() != w.len() && clip_sound_wav(2).len() > 44);
             assert_eq!(&w[0..4], b"RIFF");
             assert_eq!(&w[8..16], b"WAVEfmt ");
             assert_eq!(u32::from_le_bytes(w[4..8].try_into().unwrap()) as usize, w.len() - 8);
@@ -826,10 +921,28 @@ mod logic {
             let r = remux_args("a.ts", "b.mp4").join(" ");
             assert!(r.contains("-i a.ts -map 0 -c copy -movflags +faststart b.mp4"));
             assert_eq!(fmt_elapsed(187), "3:07");
+            assert!(trim_start_args("a.mp4", 10, "b.mp4").join(" ").contains("-ss 10 -i a.mp4 -map 0 -c copy"));
+            assert_eq!(derived_name("clip_X.mp4", "sin10s"), "clip_X_sin10s.mp4");
+            assert_eq!(derived_name("clip_X - ace.mp4", "discord"), "clip_X_discord - ace.mp4");
+            assert_eq!(discord_plan(30).0, 720);
+            assert!(discord_plan(60).1 > 1000 && discord_plan(60).1 < 1300);
+            assert_eq!(discord_plan(600), (360, 150));
+            let d = discord_args(0, "a.mp4", 30, "b.mp4").join(" ");
+            assert!(d.contains("-c:v h264_nvenc") && d.contains("-b:a 96k") && d.ends_with("b.mp4"));
+            assert_eq!(renamed("clip_2026-11-18_22-21-15.mp4", " ace: en *Valorant*  "), Some("clip_2026-11-18_22-21-15 - ace en Valorant.mp4".into()));
+            assert_eq!(renamed("clip_A - viejo.mp4", "nuevo"), Some("clip_A - nuevo.mp4".into()));
+            assert_eq!(renamed("clip_A.mp4", " ?? "), None);
+            assert_eq!(custom_title("clip_A - ace en Valorant.mp4"), Some("ace en Valorant"));
+            assert_eq!(custom_title("clip_A.mp4"), None);
+            assert_eq!(describe_file("clip_2026-11-18_22-21-15 - ace.mp4"), ("Clip", "18/11/2026 22:21".to_string()));
+            let files = vec![("a".into(), 40, 5 << 30, false), ("b".into(), 20, 5 << 30, true), ("c".into(), 10, 5 << 30, false), ("d".into(), 0, 5 << 30, false)];
+            assert_eq!(cleanup_plan(files.clone(), 30, 0), vec!["a".to_string()]);
+            assert_eq!(cleanup_plan(files.clone(), 0, 10), vec!["a".to_string(), "c".to_string()]);
+            assert!(cleanup_plan(files, 0, 0).is_empty());
             let t = trim_args("a.mp4", 15, "b.mp4").join(" ");
             assert!(t.contains("-sseof -15 -i a.mp4 -map 0 -c copy") && t.ends_with("+faststart b.mp4"));
-            assert_eq!(trimmed_name("clip_2026-11-18_22-21-15.mp4", 15), "clip_2026-11-18_22-21-15_ultimos15s.mp4");
-            assert_eq!(describe_file(&trimmed_name("clip_2026-11-18_22-21-15.mp4", 30)), ("Clip", "18/11/2026 22:21".to_string()));
+            assert_eq!(derived_name("clip_2026-11-18_22-21-15.mp4", "ultimos15s"), "clip_2026-11-18_22-21-15_ultimos15s.mp4");
+            assert_eq!(describe_file(&derived_name("clip_2026-11-18_22-21-15.mp4", "ultimos30s")), ("Clip", "18/11/2026 22:21".to_string()));
             assert_eq!(fmt_elapsed(3909), "1:05:09");
         }
 
@@ -1736,6 +1849,72 @@ mod app {
             }
         }
 
+        fn fav_path(&self) -> PathBuf {
+            self.cfg_path.with_file_name("favoritos.txt")
+        }
+
+        fn load_favs(&self) -> std::collections::HashSet<String> {
+            fs::read_to_string(self.fav_path()).map(|t| t.lines().filter(|l| !l.trim().is_empty()).map(|l| l.trim().to_string()).collect()).unwrap_or_default()
+        }
+
+        fn save_favs(&self, favs: &std::collections::HashSet<String>) {
+            let mut v: Vec<&String> = favs.iter().collect();
+            v.sort();
+            let text: String = v.iter().map(|n| format!("{n}\n")).collect();
+            let _ = fs::write(self.fav_path(), text);
+        }
+
+        /// Borra solos (a la papelera) los clips viejos según Opciones → Borrar clips viejos solos.
+        /// Solo mira la carpeta de clips, solo archivos de Jugadón, nunca favoritos ni lo de hoy.
+        fn auto_cleanup(&mut self) {
+            if self.cfg.keep_days == 0 && self.cfg.max_gb == 0 {
+                return;
+            }
+            let favs = self.load_favs();
+            let now = std::time::SystemTime::now();
+            let files: Vec<(String, u32, u64, bool)> = fs::read_dir(&self.cfg.folder)
+                .map(|rd| {
+                    rd.flatten()
+                        .filter_map(|e| {
+                            let name = e.file_name().to_string_lossy().into_owned();
+                            let ours = (name.starts_with("clip_") || name.starts_with("grabacion") || name.starts_with("shot_")) && (name.ends_with(".mp4") || name.ends_with(".png"));
+                            if !ours {
+                                return None;
+                            }
+                            let m = e.metadata().ok()?;
+                            let age = now.duration_since(m.modified().ok()?).map_or(0, |d| (d.as_secs() / 86_400) as u32);
+                            let fav = favs.contains(&name);
+                            Some((name, age, m.len(), fav))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let del = logic::cleanup_plan(files, self.cfg.keep_days, self.cfg.max_gb);
+            if del.is_empty() {
+                return;
+            }
+            let dir = PathBuf::from(&self.cfg.folder);
+            let mut from: Vec<u16> = Vec::new();
+            for n in &del {
+                from.extend(dir.join(n).to_string_lossy().encode_utf16());
+                from.push(0);
+            }
+            from.push(0);
+            let mut op = SHFILEOPSTRUCTW {
+                hwnd: self.hwnd,
+                wFunc: FO_DELETE,
+                pFrom: PCWSTR(from.as_ptr()),
+                fFlags: (FOF_ALLOWUNDO.0 | FOF_NOCONFIRMATION.0 | FOF_SILENT.0 | FOF_NOERRORUI.0) as u16,
+                ..Default::default()
+            };
+            unsafe {
+                let _ = SHFileOperationW(&mut op);
+            }
+            log_line(&self.log_path, &format!("limpieza automática: {} archivos a la papelera", del.len()));
+            self.notify(&format!("Limpieza automática: mandé {} clips viejos a la papelera.", del.len()), false);
+            self.fill_gallery();
+        }
+
         /// La primera vez (y con cada versión nueva) prueba en segundo plano, de a una y con prioridad baja,
         /// cada forma de grabar: 3 s a un archivo temporal. Se queda con la primera que escribe video de verdad.
         /// Así F8/F9 andan al toque con lo mejor que tenga esta PC, sea cual sea la placa o el driver.
@@ -2207,7 +2386,29 @@ mod app {
                 let _ = AppendMenuW(m, MF_POPUP, q.0 as usize, PCWSTR(t.as_ptr()));
                 let o = CreatePopupMenu().unwrap_or_default();
                 add(o, 43, "Grabar micrófono", self.cfg.mic);
-                add(o, 44, "Sonido al guardar", self.cfg.sound);
+                let so = CreatePopupMenu().unwrap_or_default();
+                for (i, name) in ["Tin-tin", "Suave", "Moneda"].iter().enumerate() {
+                    add(so, 70 + i, name, self.cfg.sound && self.cfg.sound_style == i as u32);
+                }
+                sep(so);
+                add(so, 44, "Sin sonido", !self.cfg.sound);
+                let t = wide("Sonido al guardar");
+                let _ = AppendMenuW(o, MF_POPUP, so.0 as usize, PCWSTR(t.as_ptr()));
+                let cl = CreatePopupMenu().unwrap_or_default();
+                for (i, d) in [0u32, 7, 30, 90].iter().enumerate() {
+                    let label = if *d == 0 { "Nunca por antigüedad".to_string() } else { format!("Los de más de {d} días") };
+                    add(cl, 60 + i, &label, self.cfg.keep_days == *d);
+                }
+                sep(cl);
+                for (i, g) in [0u32, 10, 25, 50].iter().enumerate() {
+                    let label = if *g == 0 { "Sin límite de espacio".to_string() } else { format!("Los más viejos si pasan de {g} GB") };
+                    add(cl, 64 + i, &label, self.cfg.max_gb == *g);
+                }
+                sep(cl);
+                let t = wide("(los favoritos nunca se borran; todo va a la papelera)");
+                let _ = AppendMenuW(cl, MF_STRING | MF_GRAYED, 0, PCWSTR(t.as_ptr()));
+                let t = wide("Borrar clips viejos solos");
+                let _ = AppendMenuW(o, MF_POPUP, cl.0 as usize, PCWSTR(t.as_ptr()));
                 add(o, 48, "Permitir grabar con el procesador si la placa no puede", !self.cfg.gpu_only);
                 sep(o);
                 add(o, 30, "Tecla de clip…", false);
@@ -2275,6 +2476,22 @@ mod app {
                     if self.cfg.probed.is_empty() {
                         self.start_probe();
                     }
+                }
+                70..=72 => {
+                    self.cfg.sound = true;
+                    self.cfg.sound_style = (id - 70) as u32;
+                    self.sound = logic::clip_sound_wav(self.cfg.sound_style);
+                    self.save_cfg();
+                    self.play_sound();
+                }
+                60..=67 => {
+                    if id < 64 {
+                        self.cfg.keep_days = [0, 7, 30, 90][id - 60];
+                    } else {
+                        self.cfg.max_gb = [0, 10, 25, 50][id - 64];
+                    }
+                    self.save_cfg();
+                    self.auto_cleanup();
                 }
                 44 => {
                     self.cfg.sound = !self.cfg.sound;
@@ -2455,6 +2672,9 @@ mod app {
                     drag: None,
                     tracking: false,
                     focus: None,
+                    favs: std::collections::HashSet::new(),
+                    edit: None,
+                    edit_brush: CreateSolidBrush(COLORREF(rgb(52, 46, 72))),
                 });
                 self.fill_gallery();
                 // refresco del reloj de grabación y del estado (solo mientras la ventana está abierta)
@@ -2467,7 +2687,12 @@ mod app {
         /// Lee la carpeta de clips (solo nombres, tamaños y fechas). Las miniaturas se piden al dibujar.
         fn fill_gallery(&mut self) {
             let folder = self.cfg.folder.clone();
+            if self.gallery.is_none() {
+                return;
+            }
+            let favs = self.load_favs();
             let Some(g) = self.gallery.as_mut() else { return };
+            g.favs = favs;
             let mut files: Vec<(std::time::SystemTime, PathBuf, u64)> = fs::read_dir(&folder)
                 .map(|rd| {
                     rd.flatten()
@@ -2495,8 +2720,12 @@ mod app {
                         "Captura" => 2,
                         _ => 3,
                     };
-                    let title = if date.is_empty() { name.clone() } else { format!("{kind} del {date}") };
-                    Item { path, kind: k, title, size: len, dur: None, thumb: None, asked: false }
+                    let title = match logic::custom_title(&name) {
+                        Some(t) => t.to_string(),
+                        None if date.is_empty() => name.clone(),
+                        None => format!("{kind} del {date}"),
+                    };
+                    Item { path, name, kind: k, title, size: len, dur: None, thumb: None, asked: false }
                 })
                 .collect();
             g.counts = [0; 4];
@@ -2511,30 +2740,145 @@ mod app {
             }
         }
 
-        fn trim_selected(&self, secs: u32) {
+        /// Copias de un video sin tocar el original: 0 = últimos N s, 1 = sin los primeros N s, 2 = para Discord.
+        /// Corren en un hilo con prioridad baja; al terminar avisan y la ventana se actualiza.
+        fn make_copy(&self, op: u8, secs: u32) {
             let Some(f) = self.selected_file() else {
                 self.notify("Elegí un clip de la lista primero.", false);
                 return;
             };
             if !f.extension().is_some_and(|x| x.eq_ignore_ascii_case("mp4")) {
-                self.notify("Solo se pueden acortar videos.", false);
+                self.notify("Esto es solo para videos.", false);
                 return;
             }
             let name = f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            let out = f.with_file_name(logic::trimmed_name(&name, secs));
-            let (ffmpeg, log) = (self.ffmpeg.clone(), self.log_path.clone());
+            let tag = match op {
+                0 => format!("ultimos{secs}s"),
+                1 => format!("sin{secs}s"),
+                _ => "discord".to_string(),
+            };
+            let out = f.with_file_name(logic::derived_name(&name, &tag));
+            let (ffmpeg, log, enc) = (self.ffmpeg.clone(), self.log_path.clone(), self.cfg.encoder.min(ENCODERS.len() - 1));
+            let dur = self.gallery.as_ref().and_then(|g| g.items.get(g.sel?)?.dur);
+            if op == 2 {
+                self.notify("Achicando el clip para Discord (lo comprime la placa, puede tardar unos segundos)…", false);
+            }
             std::thread::spawn(move || {
-                let args = logic::trim_args(&f.to_string_lossy(), secs, &out.to_string_lossy());
+                let (src, dst) = (f.to_string_lossy().into_owned(), out.to_string_lossy().into_owned());
+                let args = match op {
+                    0 => logic::trim_args(&src, secs, &dst),
+                    1 => logic::trim_start_args(&src, secs, &dst),
+                    _ => logic::discord_args(enc, &src, dur.unwrap_or(60), &dst),
+                };
                 let mut cmd = Command::new(ffmpeg);
                 cmd.args(&args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(log_stdio(&log));
                 let ok = spawn_hidden(&mut cmd, IDLE).and_then(|mut c| c.wait()).is_ok_and(|s| s.success());
-                if ok {
-                    post_text(format!("Listo: quedaron los últimos {secs} s en un clip nuevo (el original no se tocó)."), Some(out.to_string_lossy().into_owned()));
+                let size = fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
+                if ok && size > 0 {
+                    let msg = match op {
+                        0 => format!("Listo: quedaron los últimos {secs} s en un clip nuevo (el original no se tocó)."),
+                        1 => format!("Listo: copia sin los primeros {secs} s (el original no se tocó)."),
+                        _ if size > 10 << 20 => format!("Copia para Discord lista, pero quedó de {} (el clip es muy largo: acortalo primero).", logic::fmt_size(size)),
+                        _ => format!("Copia para Discord lista ({}): copiala y pegala en Discord.", logic::fmt_size(size)),
+                    };
+                    post_text(msg, Some(dst));
                 } else {
                     let _ = fs::remove_file(&out);
-                    post_text("No pude acortar el clip (mirá jugadon.log).".to_string(), None);
+                    post_text("No pude hacer la copia del clip (mirá el registro).".to_string(), None);
                 }
             });
+        }
+
+        fn toggle_fav(&mut self) {
+            let Some(f) = self.selected_file() else { return };
+            let name = f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let mut favs = self.load_favs();
+            if !favs.remove(&name) {
+                favs.insert(name);
+            }
+            self.save_favs(&favs);
+            if let Some(g) = self.gallery.as_mut() {
+                g.favs = favs;
+                g.rebuild_view();
+                g.redraw();
+            }
+        }
+
+        /// Renombrar: el cuadro de texto aparece sobre el título de la tarjeta.
+        fn begin_rename(&mut self) {
+            let Some(g) = self.gallery.as_mut() else { return };
+            let Some(sel) = g.sel else { return };
+            if g.edit.is_some() {
+                return;
+            }
+            let Some(r) = g.hits.iter().find(|h| h.1 == Hit::Card(sel)).map(|h| h.0) else { return };
+            let dpi = unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(g.hwnd) }.max(96) as i32;
+            let s = |v: i32| v * dpi / 96;
+            let it = &g.items[sel];
+            let name = it.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let current = logic::custom_title(&name).unwrap_or("").to_string();
+            let t = wide(&current);
+            unsafe {
+                let hinst: HINSTANCE = GetModuleHandleW(None).unwrap_or_default().into();
+                let Ok(e) = CreateWindowExW(
+                    WS_EX_NOPARENTNOTIFY,
+                    w!("EDIT"),
+                    PCWSTR(t.as_ptr()),
+                    WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_BORDER.0 | ES_AUTOHSCROLL as u32),
+                    r.left + s(10),
+                    r.bottom - s(54),
+                    r.right - r.left - s(20),
+                    s(26),
+                    Some(g.hwnd),
+                    Some(HMENU(400 as _)),
+                    Some(hinst),
+                    None,
+                ) else {
+                    return;
+                };
+                let _ = SendMessageW(e, WM_SETFONT, Some(WPARAM(g.fonts.bold.0 as usize)), Some(LPARAM(1)));
+                let _ = SendMessageW(e, EM_SETLIMITTEXT, Some(WPARAM(60)), None);
+                let _ = SendMessageW(e, EM_SETSEL, Some(WPARAM(0)), Some(LPARAM(-1)));
+                let _ = SetWindowSubclass(e, Some(edit_proc), 1, 0);
+                g.edit = Some((e, sel));
+                let _ = SetFocus(Some(e));
+            }
+        }
+
+        fn end_rename(&mut self, commit: bool) {
+            let Some(g) = self.gallery.as_mut() else { return };
+            let Some((e, idx)) = g.edit.take() else { return };
+            let mut buf = [0u16; 128];
+            let n = unsafe { GetWindowTextW(e, &mut buf) }.max(0) as usize;
+            let text = String::from_utf16_lossy(&buf[..n]);
+            unsafe {
+                let _ = DestroyWindow(e);
+                let _ = SetFocus(Some(g.hwnd));
+            }
+            let Some(path) = g.items.get(idx).map(|i| i.path.clone()) else { return };
+            if !commit {
+                g.redraw();
+                return;
+            }
+            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let Some(new) = logic::renamed(&name, &text) else {
+                g.redraw();
+                return;
+            };
+            if new == name {
+                return;
+            }
+            let to = path.with_file_name(&new);
+            if to.exists() || fs::rename(&path, &to).is_err() {
+                self.notify("No pude cambiarle el nombre (¿está abierto en otro programa?).", true);
+                return;
+            }
+            let mut favs = self.load_favs();
+            if favs.remove(&name) {
+                favs.insert(new);
+                self.save_favs(&favs);
+            }
+            self.fill_gallery();
         }
 
         fn selected_file(&self) -> Option<PathBuf> {
@@ -2554,9 +2898,32 @@ mod app {
                     self.fill_gallery();
                     return;
                 }
-                // dejar solo los últimos 10/15/30/60 s (sin recomprimir)
+                // dejar solo los últimos 10/15/30/60 s, o sacar los primeros 5/10/30 s (sin recomprimir)
                 250..=253 => {
-                    self.trim_selected([10, 15, 30, 60][id - 250]);
+                    self.make_copy(0, [10, 15, 30, 60][id - 250]);
+                    return;
+                }
+                254..=256 => {
+                    self.make_copy(1, [5, 10, 30][id - 254]);
+                    return;
+                }
+                260 => {
+                    self.make_copy(2, 0);
+                    return;
+                }
+                208 => {
+                    self.toggle_fav();
+                    return;
+                }
+                209 => {
+                    // se arma después de dibujar (para saber dónde está la tarjeta)
+                    if let Some(g) = self.gallery.as_mut() {
+                        g.reveal_sel();
+                        g.redraw();
+                        unsafe {
+                            let _ = PostMessageW(Some(g.hwnd), WM_RENAME, WPARAM(0), LPARAM(0));
+                        }
+                    }
                     return;
                 }
                 // prueba automática: elegir la tarjeta N de lo que se ve
@@ -2568,7 +2935,7 @@ mod app {
                     return;
                 }
                 // prueba automática: elegir la sección
-                240..=243 => {
+                240..=244 => {
                     if let Some(g) = self.gallery.as_mut() {
                         g.set_nav((id - 240) as u8);
                     }
@@ -2618,6 +2985,13 @@ mod app {
                     };
                     unsafe {
                         let _ = SHFileOperationW(&mut op);
+                    }
+                    if !f.exists() {
+                        let name = f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                        let mut favs = self.load_favs();
+                        if favs.remove(&name) {
+                            self.save_favs(&favs);
+                        }
                     }
                     self.fill_gallery();
                 }
@@ -2735,6 +3109,7 @@ mod app {
 
     struct Item {
         path: PathBuf,
+        name: String,
         /// 0 clip, 1 grabación, 2 captura, 3 otro video
         kind: u8,
         title: String,
@@ -2784,9 +3159,14 @@ mod app {
         tracking: bool,
         /// foco del teclado (Tab): sección, botón o las tarjetas (Card(usize::MAX))
         focus: Option<Hit>,
+        /// nombres de archivo marcados como favoritos
+        favs: std::collections::HashSet<String>,
+        /// cuadro de texto para renombrar (control, tarjeta)
+        edit: Option<(HWND, usize)>,
+        edit_brush: HBRUSH,
     }
 
-    const NAV: [(&str, u16); 4] = [("Todo", 0xE8A9), ("Clips", 0xE714), ("Grabaciones", 0xE7C8), ("Capturas", 0xEB9F)];
+    const NAV: [(&str, u16); 5] = [("Todo", 0xE8A9), ("Clips", 0xE714), ("Grabaciones", 0xE7C8), ("Capturas", 0xEB9F), ("Favoritos", 0xE734)];
     const THUMB_W: i32 = 320;
     const THUMB_H: i32 = 180;
     /// miniaturas en memoria como máximo (las que no se ven se sueltan)
@@ -2823,6 +3203,7 @@ mod app {
                 .filter(|&i| match self.nav {
                     0 => true,
                     1 => matches!(self.items[i].kind, 0 | 3),
+                    4 => self.favs.contains(&self.items[i].name),
                     n => self.items[i].kind == n - 1,
                 })
                 .collect();
@@ -2918,7 +3299,7 @@ mod app {
 
         /// Orden del Tab: secciones, botones de la barra, tarjetas.
         fn tab(&mut self, back: bool) {
-            let order: Vec<Hit> = (0..4).map(Hit::Nav).chain([Hit::Btn(0), Hit::Btn(1), Hit::Btn(2), Hit::Btn(3), Hit::Card(usize::MAX)]).collect();
+            let order: Vec<Hit> = (0..NAV.len() as u8).map(Hit::Nav).chain([Hit::Btn(0), Hit::Btn(1), Hit::Btn(2), Hit::Btn(3), Hit::Card(usize::MAX)]).collect();
             let cur = self.focus.and_then(|f| order.iter().position(|&h| h == f));
             let n = order.len();
             let next = match (cur, back) {
@@ -2958,6 +3339,7 @@ mod app {
             match vk {
                 0x0D => Some(201),
                 0x2E => Some(205),
+                0x71 => Some(209),
                 0x74 => Some(207),
                 0x21 => {
                     self.scroll_by(-self.page_h * 9 / 10);
@@ -2989,7 +3371,7 @@ mod app {
             text(dc, "BIBLIOTECA", rc(s(24), y, sw, y + s(20)), self.fonts.badge, MUTED, DT_SINGLELINE | DT_VCENTER);
             y += s(26);
             for (i, (name, glyph)) in NAV.iter().enumerate() {
-                let r = rc(s(12), y, sw - s(12), y + s(40));
+                let r = rc(s(12), y, sw - s(12), y + s(38));
                 let selected = self.nav == i as u8;
                 let hover = self.hover == Hit::Nav(i as u8);
                 if selected {
@@ -3001,14 +3383,19 @@ mod app {
                 let c = if selected { TEXT } else { rgb(200, 196, 220) };
                 glyph_at(dc, *glyph, rc(r.left + s(14), r.top, r.left + s(40), r.bottom), self.fonts.icon, if selected { ORANGE } else { c });
                 text(dc, name, rc(r.left + s(46), r.top, r.right, r.bottom), if selected { self.fonts.bold } else { self.fonts.body }, c, DT_SINGLELINE | DT_VCENTER);
-                let n = if i == 0 { self.items.len() } else if i == 1 { self.counts[0] + self.counts[3] } else { self.counts[i - 1] };
+                let n = match i {
+                    0 => self.items.len(),
+                    1 => self.counts[0] + self.counts[3],
+                    4 => self.items.iter().filter(|it| self.favs.contains(&it.name)).count(),
+                    _ => self.counts[i - 1],
+                };
                 let ns = n.to_string();
                 let pw = s(14) + ns.len() as i32 * s(7);
                 let pr = rc(r.right - s(12) - pw, r.top + s(10), r.right - s(12), r.bottom - s(10));
                 round(dc, pr, s(10), if selected { rgb(70, 58, 92) } else { rgb(40, 36, 54) });
                 text(dc, &ns, pr, self.fonts.small, if selected { TEXT } else { MUTED }, DT_SINGLELINE | DT_VCENTER | DT_CENTER);
                 self.hits.push((r, Hit::Nav(i as u8)));
-                y += s(44);
+                y += s(42);
             }
 
             // botones grandes y estado, desde abajo
@@ -3117,6 +3504,7 @@ mod app {
                 ellipse(dc, rc(mid - s(68), cy - s(20), mid + s(68), cy + s(116)), rgb(36, 28, 50));
                 let _ = DrawIconEx(dc, mid - s(48), cy, self.logo, s(96), s(96), 0, None, DI_NORMAL);
                 let (t1, t2) = match self.nav {
+                    4 => ("Todavía no hay favoritos", "Pasá el mouse por un clip y tocá la estrellita (o clic derecho → Favorito).".to_string()),
                     3 => ("Todavía no hay capturas", format!("Apretá {} y se guarda una foto de la pantalla.", keys.2)),
                     2 => ("Todavía no hay grabaciones", format!("Apretá {} para empezar a grabar y de nuevo {} para guardar.", keys.1, keys.1)),
                     _ => ("Todavía no hay clips", format!("Abrí un juego y apretá {}: se guardan los últimos {}.", keys.0, logic::fmt_elapsed(secs as u64))),
@@ -3194,6 +3582,12 @@ mod app {
                 let lr = rc(tr.left + s(10), tr.top + s(10), tr.left + s(10) + lw, tr.top + s(30));
                 round(dc, lr, s(10), color);
                 text(dc, label, lr, self.fonts.badge, TEXT, DT_SINGLELINE | DT_VCENTER | DT_CENTER);
+                let fav = self.favs.contains(&it.name);
+                if fav {
+                    let fr = rc(lr.right + s(6), lr.top, lr.right + s(28), lr.bottom);
+                    round(dc, fr, s(10), rgb(255, 196, 0));
+                    glyph_at(dc, 0xE735, fr, self.fonts.small, rgb(60, 40, 0));
+                }
                 // duración
                 if let Some(d) = it.dur {
                     let ds = logic::fmt_elapsed(d as u64);
@@ -3217,11 +3611,16 @@ mod app {
                     glyph_at(dc, 0xE768, rc(play.left + s(3), play.top, play.right + s(3), play.bottom), self.fonts.icon_big, TEXT);
                     self.hits.push((play, Hit::Play(idx)));
                     let mut ax = tr.right - s(10);
-                    for (cmd, glyph) in [(205usize, 0xE74Du16), (203, 0xE8C8), (202, 0xE72D)] {
+                    let star = if self.favs.contains(&self.items[idx].name) { 0xE735u16 } else { 0xE734 };
+                    for (cmd, glyph) in [(205usize, 0xE74Du16), (203, 0xE8C8), (202, 0xE72D), (208, star)] {
                         let ar = rc(ax - s(32), tr.top + s(8), ax, tr.top + s(40));
                         let ah = self.hover == Hit::Act(idx, cmd);
                         if ah {
-                            ellipse(dc, ar, if cmd == 205 { RED } else { ORANGE });
+                            ellipse(dc, ar, match cmd {
+                                205 => RED,
+                                208 => rgb(230, 170, 0),
+                                _ => ORANGE,
+                            });
                         } else {
                             shade_round(dc, ar, s(32), 0, 170);
                         }
@@ -3231,6 +3630,7 @@ mod app {
                             let label = match cmd {
                                 205 => "Eliminar",
                                 203 => "Copiar",
+                                208 => "Favorito",
                                 _ => "Compartir",
                             };
                             let lw = text_w(dc, self.fonts.small, label) + s(16);
@@ -3292,6 +3692,7 @@ mod app {
             self.tx = None;
             self.free_thumbs();
             unsafe {
+                let _ = DeleteObject(self.edit_brush.into());
                 for f in [self.fonts.brand, self.fonts.h1, self.fonts.body, self.fonts.bold, self.fonts.small, self.fonts.badge, self.fonts.icon, self.fonts.icon_big] {
                     let _ = DeleteObject(f.into());
                 }
@@ -3521,29 +3922,58 @@ mod app {
     }
 
     /// Menú del clic derecho sobre una tarjeta.
-    unsafe fn card_menu(hwnd: HWND, video: bool) -> usize {
+    unsafe fn card_menu(hwnd: HWND, video: bool, fav: bool) -> usize {
         let m = CreatePopupMenu().unwrap_or_default();
-        for (id, t) in [(201usize, "Abrir\tEnter"), (202, "Compartir…"), (203, "Copiar (para pegar en Discord o WhatsApp)\tCtrl+C"), (204, "Mostrar en carpeta")] {
+        let item = |menu: HMENU, id: usize, t: &str| {
             let t = wide(t);
-            let _ = AppendMenuW(m, MF_STRING, id, PCWSTR(t.as_ptr()));
-        }
+            let _ = AppendMenuW(menu, MF_STRING, id, PCWSTR(t.as_ptr()));
+        };
+        item(m, 201, "Abrir\tEnter");
+        item(m, 202, "Compartir…");
+        item(m, 203, "Copiar (para pegar en Discord o WhatsApp)\tCtrl+C");
+        item(m, 208, if fav { "Quitar de favoritos" } else { "Agregar a favoritos ⭐" });
+        item(m, 209, "Renombrar…\tF2");
         if video {
+            item(m, 260, "Achicar para Discord (menos de 10 MB)");
             let sub = CreatePopupMenu().unwrap_or_default();
-            for (i, t) in ["Últimos 10 segundos", "Últimos 15 segundos", "Últimos 30 segundos", "Último minuto"].iter().enumerate() {
-                let t = wide(t);
-                let _ = AppendMenuW(sub, MF_STRING, 250 + i, PCWSTR(t.as_ptr()));
+            for (i, t) in ["Dejar los últimos 10 segundos", "Dejar los últimos 15 segundos", "Dejar los últimos 30 segundos", "Dejar el último minuto"].iter().enumerate() {
+                item(sub, 250 + i, t);
             }
-            let t = wide("Acortar (crea una copia)");
+            let _ = AppendMenuW(sub, MF_SEPARATOR, 0, PCWSTR::null());
+            for (i, t) in ["Sacar los primeros 5 segundos", "Sacar los primeros 10 segundos", "Sacar los primeros 30 segundos"].iter().enumerate() {
+                item(sub, 254 + i, t);
+            }
+            let t = wide("Recortar (crea una copia)");
             let _ = AppendMenuW(m, MF_POPUP, sub.0 as usize, PCWSTR(t.as_ptr()));
         }
+        item(m, 204, "Mostrar en carpeta");
         let _ = AppendMenuW(m, MF_SEPARATOR, 0, PCWSTR::null());
-        let t = wide("Eliminar\tSupr");
-        let _ = AppendMenuW(m, MF_STRING, 205, PCWSTR(t.as_ptr()));
+        item(m, 205, "Eliminar\tSupr");
         let mut pt = POINT::default();
         let _ = GetCursorPos(&mut pt);
         let cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY, pt.x, pt.y, None, hwnd, None);
         let _ = DestroyMenu(m);
         cmd.0 as usize
+    }
+
+    const WM_RENAME: u32 = WM_APP + 20;
+    const WM_RENAME_DONE: u32 = WM_APP + 21;
+
+    /// Cuadro de texto de renombrar: Enter guarda, Esc cancela.
+    unsafe extern "system" fn edit_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM, _id: usize, _data: usize) -> LRESULT {
+        if msg == WM_KEYDOWN && (wp.0 == 0x0D || wp.0 == 0x1B) {
+            if let Ok(parent) = GetParent(hwnd) {
+                let _ = PostMessageW(Some(parent), WM_RENAME_DONE, WPARAM((wp.0 == 0x0D) as usize), LPARAM(0));
+            }
+            return LRESULT(0);
+        }
+        if msg == WM_CHAR && (wp.0 == 0x0D || wp.0 == 0x1B) {
+            return LRESULT(0); // sin el "ding" de Windows
+        }
+        if msg == WM_GETDLGCODE {
+            return LRESULT(DLGC_WANTALLKEYS as isize);
+        }
+        DefSubclassProc(hwnd, msg, wp, lp)
     }
 
     unsafe extern "system" fn gallery_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
@@ -3660,15 +4090,15 @@ mod app {
                         Hit::Card(i) | Hit::Play(i) | Hit::Act(i, _) => {
                             g.sel = Some(i);
                             g.redraw();
-                            Some(g.items[i].kind != 2)
+                            Some((g.items[i].kind != 2, g.favs.contains(&g.items[i].name)))
                         }
                         _ => None,
                     }
                 })
                 .flatten();
-                if let Some(video) = on_card {
+                if let Some((video, fav)) = on_card {
                     let _ = UpdateWindow(hwnd);
-                    let cmd = card_menu(hwnd, video);
+                    let cmd = card_menu(hwnd, video, fav);
                     if cmd != 0 {
                         with_app(|a| a.gallery_cmd(cmd));
                     }
@@ -3691,9 +4121,9 @@ mod app {
                 let shift = GetKeyState(VK_SHIFT.0 as i32) < 0;
                 // tecla de menú o Shift+F10: el menú de la tarjeta elegida
                 if vk == 0x5D || (shift && vk == 0x79) {
-                    let video = with_app(|a| a.gallery.as_ref().and_then(|g| g.sel.map(|i| g.items[i].kind != 2))).flatten();
-                    if let Some(video) = video {
-                        let cmd = card_menu(hwnd, video);
+                    let video = with_app(|a| a.gallery.as_ref().and_then(|g| g.sel.map(|i| (g.items[i].kind != 2, g.favs.contains(&g.items[i].name))))).flatten();
+                    if let Some((video, fav)) = video {
+                        let cmd = card_menu(hwnd, video, fav);
                         if cmd != 0 {
                             with_app(|a| a.gallery_cmd(cmd));
                         }
@@ -3731,7 +4161,29 @@ mod app {
             WM_GETDLGCODE => LRESULT(DLGC_WANTALLKEYS as isize),
             WM_COMMAND => {
                 let id = wp.0 & 0xFFFF;
+                if lp.0 != 0 {
+                    // aviso del cuadro de renombrar: si pierde el foco, se guarda
+                    if id == 400 && ((wp.0 >> 16) & 0xFFFF) as u32 == EN_KILLFOCUS {
+                        let _ = PostMessageW(Some(hwnd), WM_RENAME_DONE, WPARAM(1), LPARAM(0));
+                    }
+                    return LRESULT(0);
+                }
                 with_app(|a| a.gallery_cmd(id));
+                LRESULT(0)
+            }
+            WM_CTLCOLOREDIT => {
+                let dc = HDC(wp.0 as _);
+                SetTextColor(dc, COLORREF(TEXT));
+                SetBkColor(dc, COLORREF(rgb(52, 46, 72)));
+                let br = with_app(|a| a.gallery.as_ref().map(|g| g.edit_brush)).flatten().unwrap_or_default();
+                LRESULT(br.0 as isize)
+            }
+            WM_RENAME => {
+                with_app(|a| a.begin_rename());
+                LRESULT(0)
+            }
+            WM_RENAME_DONE => {
+                with_app(|a| a.end_rename(wp.0 == 1));
                 LRESULT(0)
             }
             WM_THUMB => {
@@ -3929,6 +4381,7 @@ mod app {
                     if file.is_some() {
                         a.last_file = file;
                         a.fill_gallery();
+                        a.auto_cleanup();
                     }
                 });
                 trim_ram();
@@ -4077,6 +4530,7 @@ mod app {
             MAIN_HWND.store(hwnd.0 as isize, Ordering::Relaxed);
 
             let enc = logic::first_encoder(cfg.encoder, cfg.gpu_only);
+            let cfg_sound_style = cfg.sound_style;
             let app = App {
                 hwnd,
                 cfg,
@@ -4110,7 +4564,7 @@ mod app {
                 last_game: None,
                 last_trim: None,
                 last_file: None,
-                sound: logic::clip_sound_wav(),
+                sound: logic::clip_sound_wav(cfg_sound_style),
             };
             APP.with(|a| *a.borrow_mut() = Some(app));
             with_app(|a| {
@@ -4118,6 +4572,7 @@ mod app {
                 a.register_keys();
                 a.recover_recordings();
                 a.start_probe();
+                a.auto_cleanup();
                 a.tick(); // arranca a grabar ya si no está en "solo juegos" o si ya hay un juego abierto
                 // "jugadon.exe --clips" abre directo la ventana (sirve para un acceso directo)
                 if std::env::args().any(|x| x == "--clips") {

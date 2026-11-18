@@ -57,7 +57,12 @@ Se abre con **clic izquierdo** en el ícono (o con `jugadon.exe --clips`, útil 
 
 - **Barra lateral**: secciones Todo / Clips / Grabaciones / Capturas con su cantidad, botón grande **Grabar pantalla** (se pone rojo con el reloj mientras grabás y sirve para frenar), **Guardar clip**, **Abrir carpeta**, **Ajustes** (el mismo menú del ícono) y el estado actual.
 - **Tarjetas grandes** con miniatura, etiqueta de color (clip, grabación, captura) y duración. Al pasar el mouse aparecen el botón **▶** y los botones rápidos **Compartir**, **Copiar** (para pegar con Ctrl+V en Discord o WhatsApp) y **Eliminar** (va a la papelera).
-- **Clic derecho** en una tarjeta: Abrir, Compartir, Copiar, Mostrar en carpeta, **Acortar** (deja solo los últimos 10 s, 15 s, 30 s o 1 minuto en una copia, al instante y sin perder calidad) y Eliminar. **Doble clic** abre el video.
+- **Clic derecho** en una tarjeta:
+  - **Favorito ⭐**: aparecen en la sección Favoritos y la limpieza automática nunca los borra.
+  - **Renombrar** (o F2): le ponés nombre a la jugada ("ace en Valorant"), sin perder la fecha.
+  - **Achicar para Discord**: una copia de menos de 10 MB, comprimida por la placa, para mandarla sin Nitro.
+  - **Recortar**: dejar solo los últimos 10 s, 15 s, 30 s o 1 minuto, o sacar los primeros 5, 10 o 30 s. Es una copia instantánea, sin perder calidad.
+  - Abrir, Compartir, Copiar, Mostrar en carpeta y Eliminar. **Doble clic** abre el video.
 - **Todo con teclado**: Tab recorre las secciones y los botones, flechas para moverte entre clips, Enter abre, Supr elimina, Ctrl+C copia, tecla de menú (o Shift+F10) abre las opciones del clip, F5 actualiza. Lo que tiene el foco se marca con un borde blanco.
 
 Está dibujada a mano por Jugadón, en Rust, con lo básico de Windows (GDI): sin navegador por dentro y sin librerías de interfaz. Solo carga las miniaturas que se ven (como mucho 36 en memoria, con prioridad baja) y **cerrarla con la X la libera entera**; Jugadón sigue en la bandeja.
@@ -71,7 +76,7 @@ Está dibujada a mano por Jugadón, en Rust, con lo básico de Windows (GDI): si
 - **Calidad ▸**:
   - **Automática** (recomendada): 720p 30 fps si comprime la placa; 480p 30 fps si tiene que usar el procesador.
   - O la elegís: 480p 30 fps (ahorro máximo), 720p 30 fps, 720p 60 fps.
-- **Opciones ▸**: grabar micrófono (activado), sonido al guardar, **permitir grabar con el procesador** (desactivado), cambiar teclas, iniciar con Windows, volver a probar cómo grabar, ver registro.
+- **Opciones ▸**: grabar micrófono (activado), sonido al guardar (tin-tin, suave, moneda o sin sonido), **borrar clips viejos solos** (los de más de 7, 30 o 90 días, o los más viejos si la carpeta pasa de 10, 25 o 50 GB; nunca los favoritos, y todo va a la papelera), **permitir grabar con el procesador** (desactivado), cambiar teclas, iniciar con Windows, volver a probar cómo grabar, ver registro.
 - **Abrir carpeta**, **Salir**.
 
 La configuración está en `%APPDATA%\Jugadon\config.ini`. Ahí también se puede cambiar la carpeta de salida (`folder=`).

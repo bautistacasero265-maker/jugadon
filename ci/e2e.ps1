@@ -210,6 +210,17 @@ try {
     Key 0x78
     Start-Sleep -Seconds 1
     Check ((Cfg 'clip_key') -eq '120') "volver la tecla de clip a F9 ($cuando)"
+    foreach ($st in 70, 71, 72) { Cmd $st; Check ((Cfg 'sound_style') -eq "$($st - 70)") "sonido al guardar estilo $($st - 70) ($cuando)" }
+    # limpieza automática: un clip "de hace 100 días" se va a la papelera con la opción de 90 días
+    $old = Join-Path $out 'clip_2020-01-01_00-00-00.mp4'
+    Copy-Item ((Files 'clip_*.mp4')[0].FullName) $old
+    (Get-Item $old).LastWriteTime = (Get-Date).AddDays(-100)
+    Cmd 63
+    Start-Sleep -Seconds 2
+    Check (-not (Test-Path $old)) "borrar clips viejos solos (más de 90 días) ($cuando)"
+    Check ((Files 'clip_*.mp4').Count -gt 0) "la limpieza no borró los clips nuevos ($cuando)"
+    Cmd 60
+    Check ((Cfg 'keep_days') -eq '0') "limpieza automática apagada de nuevo ($cuando)"
     Cmd 40
     Alive "menú $cuando"
   }
@@ -241,6 +252,41 @@ try {
   $f = Wait-New '*_ultimos10s.mp4' $n 30
   Check-Video $f 6 "Acortar → últimos 10 s"
   if ($f) { $p = Probe $f; Check ($p.Dur -le 13) "el clip acortado dura como mucho ~10 s" }
+  # Sacar los primeros 5 s
+  GCmd 241
+  GCmd 210
+  $n = (Files '*_sin5s*.mp4').Count
+  GCmd 254
+  Check-Video (Wait-New '*_sin5s*.mp4' $n 30) 5 "Recortar → sacar los primeros 5 s"
+  # Achicar para Discord (menos de 10 MB)
+  GCmd 241
+  GCmd 210
+  $n = (Files '*_discord*.mp4').Count
+  GCmd 260
+  $f = Wait-New '*_discord*.mp4' $n 120
+  Check-Video $f 5 "Achicar para Discord"
+  if ($f) { Check ((Get-Item $f).Length -lt 10MB) "la copia para Discord pesa menos de 10 MB" }
+  # Favoritos
+  GCmd 241
+  GCmd 210
+  GCmd 208
+  $fav = Join-Path $cfgDir 'favoritos.txt'
+  Check ((Test-Path $fav) -and ((Get-Content $fav -Raw) -match 'clip_')) "marcar un clip como favorito"
+  GCmd 244
+  Start-Sleep -Milliseconds 800
+  Snap $script:gal 'galeria_favoritos.png'
+  # Renombrar: F2 abre el cuadro, se escribe "ace" y Enter
+  GCmd 241
+  GCmd 210
+  [void][W]::SetForegroundWindow($script:gal)
+  Start-Sleep -Milliseconds 500
+  GCmd 209
+  Start-Sleep -Seconds 1
+  foreach ($k in 0x41, 0x43, 0x45) { Key $k }
+  Key 0x0D
+  Start-Sleep -Seconds 2
+  Check ((Files '* - ace.mp4').Count -ge 1) "renombrar un clip (queda '… - ace.mp4')"
+  Snap $script:gal 'galeria_renombrado.png'
   GCmd 240
   # Tab recorre secciones y botones; Enter sobre "Capturas" cambia de sección
   foreach ($i in 1..4) { [void][W]::PostMessage($script:gal, 0x100, [IntPtr]0x09, [IntPtr]::Zero) }
