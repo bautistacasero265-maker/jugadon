@@ -75,6 +75,7 @@ Está hecha con los controles propios de Windows: no usa un navegador por dentro
 - **Opciones**:
   - **Grabar micrófono**: activado por defecto.
   - **Sonido al guardar**.
+  - **Usar solo la placa de video**: activado por defecto. Nunca usa el procesador para comprimir.
   - **Tecla de clip…** / **Tecla de captura…** / **Tecla de grabar/frenar…**: apretá la tecla nueva (se puede combinar con Ctrl, Alt o Shift). Esc cancela.
   - **Iniciar con Windows**.
 - **Abrir carpeta**.
@@ -103,7 +104,11 @@ Jugadón está pensado para estas PCs. Lo que define si se nota o no es **quién
 | Gráficos Intel con Quick Sync (el i3-2100 lo tiene, HD 2000) | Intel Quick Sync, si el driver lo deja usar | Bajo impacto. Con drivers muy viejos puede no estar disponible |
 | Sin encoder disponible | El procesador (x264 "ultrafast", 2 hilos, prioridad baja) | Funciona, pero en un procesador de 2 núcleos **se nota algo**. Si te molesta, pasá a **480p** |
 
-Jugadón prueba solo, en ese orden, y se queda con lo más liviano que funcione en tu PC. Si pasás el mouse por el ícono, te dice cuál usa; si dice "usa CPU", estás en la última fila.
+Jugadón prueba solo, en ese orden, y se queda con lo más liviano que funcione en tu PC.
+
+**Opciones → "Usar solo la placa de video"** viene **activada**. Así Jugadón comprime **solo** con la placa (NVENC, AMF o Quick Sync) y **nunca** usa el procesador para eso. Si tu placa no puede, no graba y te avisa: el juego no pierde nada. Si preferís que grabe igual usando el procesador, desactivala.
+
+Sobre los "decodificadores": para grabar, la placa **codifica** (comprime) el video. Los decodificadores sirven para **reproducir**, y ahí Windows ya usa la placa solo cuando abrís un clip. Guardar un clip no decodifica ni recodifica nada: solo une los pedazos ya comprimidos. Si pasás el mouse por el ícono, te dice cuál usa; si dice "usa CPU", estás en la última fila.
 
 Con drivers viejos (Windows 10 con el driver de Intel HD 2000/3000) puede no estar la captura moderna de Windows. En ese caso graba por **GDI**, que anda en cualquier PC pero carga más la CPU.
 

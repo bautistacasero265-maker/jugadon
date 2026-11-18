@@ -38,6 +38,8 @@ mod logic {
         pub rec: Hotkey,
         pub mic: bool,
         pub sound: bool,
+        /// comprimir solo con la placa de video (NVENC/AMF/QSV); nunca x264 en el procesador
+        pub gpu_only: bool,
     }
 
     impl Config {
@@ -54,6 +56,7 @@ mod logic {
                 rec: Hotkey { vk: VK_F8, mods: 0 },
                 mic: true,
                 sound: true,
+                gpu_only: true,
             }
         }
 
@@ -81,6 +84,7 @@ mod logic {
                     ("rec_mods", Some(n)) => c.rec.mods = n & 7,
                     ("mic", Some(n)) if n <= 1 && v2 => c.mic = n == 1,
                     ("sound", Some(n)) if n <= 1 => c.sound = n == 1,
+                    ("gpu_only", Some(n)) if n <= 1 => c.gpu_only = n == 1,
                     _ => {}
                 }
             }
@@ -94,7 +98,7 @@ mod logic {
 
         pub fn serialize(&self) -> String {
             format!(
-                "version=2\nseconds={}\nfps={}\nheight={}\nclip_key={}\nclip_mods={}\nshot_key={}\nshot_mods={}\nfolder={}\nencoder={}\nbg={}\nrec_key={}\nrec_mods={}\nmic={}\nsound={}\n",
+                "version=2\nseconds={}\nfps={}\nheight={}\nclip_key={}\nclip_mods={}\nshot_key={}\nshot_mods={}\nfolder={}\nencoder={}\nbg={}\nrec_key={}\nrec_mods={}\nmic={}\nsound={}\ngpu_only={}\n",
                 self.secs,
                 self.fps,
                 self.height,
@@ -108,7 +112,8 @@ mod logic {
                 self.rec.vk,
                 self.rec.mods,
                 self.mic as u8,
-                self.sound as u8
+                self.sound as u8,
+                self.gpu_only as u8
             )
         }
     }
@@ -194,6 +199,37 @@ mod logic {
         // último recurso: driver sin Desktop Duplication (WDDM 1.1). Captura por GDI, todo en CPU.
         Enc { gdi: true, label: "x264 (captura GDI)", vf: "scale=-2:min(720\\,trunc(ih/2)*2):flags=fast_bilinear,format=nv12", codec: "libx264", opts: X264 },
     ];
+
+    /// ¿Se puede usar este encoder? Con gpu_only, x264 (procesador) queda afuera.
+    pub fn allowed(enc: usize, gpu_only: bool) -> bool {
+        !gpu_only || ENCODERS[enc].codec != "libx264"
+    }
+
+    /// Encoder con el que arrancar: el que anduvo la última vez, si está permitido.
+    pub fn first_encoder(saved: usize, gpu_only: bool) -> usize {
+        if saved < ENCODERS.len() && allowed(saved, gpu_only) {
+            saved
+        } else {
+            0
+        }
+    }
+
+    /// Siguiente encoder a probar cuando `enc` falló. `tried` = cuántos se probaron antes de `enc`.
+    /// Devuelve (encoder, nuevo tried) o None si no queda ninguno.
+    pub fn next_encoder(enc: usize, tried: usize, gpu_only: bool) -> Option<(usize, usize)> {
+        let n = ENCODERS.len();
+        let (mut e, mut t) = (enc, tried);
+        loop {
+            t += 1;
+            if t >= n {
+                return None;
+            }
+            e = (e + 1) % n;
+            if allowed(e, gpu_only) {
+                return Some((e, t));
+            }
+        }
+    }
 
     /// Alto y fps reales para un encoder: x264 usa CPU, así que nunca pasa de 30 fps.
     pub fn effective(enc: usize, height: u32, fps: u32) -> (u32, u32) {
@@ -497,6 +533,8 @@ mod logic {
         #[test]
         fn new_options_default_and_parse() {
             let d = Config::defaults("F".into());
+            assert!(d.gpu_only);
+            assert!(!Config::parse("gpu_only=0\n", "F".into()).gpu_only);
             assert!(d.bg == BG_GAMES && d.mic && d.sound && d.rec.vk == VK_F8);
             let c = Config::parse("version=2\nbg=0\nmic=0\nsound=0\n", "F".into());
             assert!(c.bg == BG_OFF && !c.mic && !c.sound);
@@ -509,6 +547,32 @@ mod logic {
             // tecla de grabar repetida -> defaults
             let c = Config::parse("rec_key=120\n", "F".into());
             assert_eq!((c.clip.vk, c.shot.vk, c.rec.vk), (VK_F9, VK_F10, VK_F8));
+        }
+
+        #[test]
+        fn encoder_chain() {
+            // solo placa: recorre NVENC, AMF, QSV y sus variantes, nunca x264
+            let mut seen = vec![0];
+            let (mut e, mut t) = (0, 0);
+            while let Some((ne, nt)) = next_encoder(e, t, true) {
+                seen.push(ne);
+                (e, t) = (ne, nt);
+            }
+            assert!(seen.iter().all(|&i| ENCODERS[i].codec != "libx264"), "{seen:?}");
+            assert_eq!(seen.len(), 6);
+            // sin restricción: prueba los 9
+            let mut n = 1;
+            let (mut e, mut t) = (0, 0);
+            while let Some((ne, nt)) = next_encoder(e, t, false) {
+                n += 1;
+                (e, t) = (ne, nt);
+            }
+            assert_eq!(n, ENCODERS.len());
+            // arrancando de uno guardado en el medio, da la vuelta
+            assert_eq!(next_encoder(5, 0, true), Some((0, 4)));
+            assert_eq!(first_encoder(7, true), 0);
+            assert_eq!(first_encoder(7, false), 7);
+            assert_eq!(first_encoder(2, true), 2);
         }
 
         #[test]
@@ -1192,7 +1256,11 @@ mod app {
                 let cpu = if ENCODERS[self.rec.enc].codec == "libx264" { " – sin encoder de placa: usa CPU" } else { "" };
                 format!("Grabando ({}{audio}){cpu}", ENCODERS[self.rec.enc].label)
             } else if self.rec.gave_up {
-                "Sin grabar: error (mirá jugadon.log)".to_string()
+                if self.cfg.gpu_only {
+                    "Sin grabar: la placa no puede comprimir (ver Opciones)".to_string()
+                } else {
+                    "Sin grabar: error (mirá jugadon.log)".to_string()
+                }
             } else if self.rec.child.is_none() && !self.want_rec() {
                 "En pausa: esperando un juego".to_string()
             } else {
@@ -1363,7 +1431,7 @@ mod app {
             let _ = fs::create_dir_all(&self.rec_dir);
             let ts = self.rec_dir.join(format!("grabacion_{}.ts", now_stamp()));
             let now = Instant::now();
-            self.manual = Some(Manual { child: None, enc: self.cfg.encoder, tried: 0, started: now, t0: now, ts, src, what, audio: false });
+            self.manual = Some(Manual { child: None, enc: logic::first_encoder(self.cfg.encoder, self.cfg.gpu_only), tried: 0, started: now, t0: now, ts, src, what, audio: false });
             self.spawn_manual();
             self.play_sound();
             let what = self.manual.as_ref().map(|m| m.what.clone()).unwrap_or_default();
@@ -1444,6 +1512,7 @@ mod app {
             self.rec.good = false;
             self.rec.gave_up = false;
             self.rec.fails = 0;
+            self.rec.enc = logic::first_encoder(self.rec.enc, self.cfg.gpu_only);
             if self.want_rec() {
                 self.spawn_rec();
             } else {
@@ -1462,12 +1531,13 @@ mod app {
                     }
                 }
                 // ffmpeg de la grabación manual terminó solo
-                if m.started.elapsed() < QUICK_DEATH && m.tried + 1 < ENCODERS.len() {
-                    m.tried += 1;
-                    m.enc = (m.enc + 1) % ENCODERS.len();
-                    self.spawn_manual();
-                } else {
-                    self.finish_manual(true);
+                match logic::next_encoder(m.enc, m.tried, self.cfg.gpu_only) {
+                    Some((e, t)) if m.started.elapsed() < QUICK_DEATH => {
+                        m.enc = e;
+                        m.tried = t;
+                        self.spawn_manual();
+                    }
+                    _ => self.finish_manual(true),
                 }
                 return;
             }
@@ -1524,16 +1594,24 @@ mod app {
                     self.rec.fails = if ran < QUICK_DEATH { (self.rec.fails + 1).min(4) } else { 0 };
                     self.rec.next_try = Some(now + Duration::from_secs(2u64 << self.rec.fails));
                 } else {
-                    self.rec.tried += 1;
-                    if self.rec.tried >= ENCODERS.len() {
-                        self.rec.gave_up = true;
-                        log_line(&self.log_path, "ningún encoder funcionó");
-                        self.notify("No pude iniciar la grabación con ningún encoder. Mirá %TEMP%\\jugadon.log", true);
-                        self.update_tip();
-                        return;
+                    match logic::next_encoder(self.rec.enc, self.rec.tried, self.cfg.gpu_only) {
+                        Some((e, t)) => {
+                            self.rec.enc = e;
+                            self.rec.tried = t;
+                            self.rec.next_try = Some(now);
+                        }
+                        None => {
+                            self.rec.gave_up = true;
+                            log_line(&self.log_path, "ningún encoder funcionó");
+                            if self.cfg.gpu_only {
+                                self.notify("Tu placa de video no pudo comprimir el video, así que no grabo (para no usar el procesador). Para grabar igual: menú → Opciones → desmarcá \"Usar solo la placa de video\".", true);
+                            } else {
+                                self.notify("No pude iniciar la grabación con ningún encoder. Mirá %TEMP%\\jugadon.log", true);
+                            }
+                            self.update_tip();
+                            return;
+                        }
                     }
-                    self.rec.enc = (self.rec.enc + 1) % ENCODERS.len();
-                    self.rec.next_try = Some(now);
                 }
                 self.update_tip();
             }
@@ -1776,6 +1854,7 @@ mod app {
                 let o = CreatePopupMenu().unwrap_or_default();
                 add(o, 43, "Grabar micrófono", self.cfg.mic);
                 add(o, 44, "Sonido al guardar", self.cfg.sound);
+                add(o, 48, "Usar solo la placa de video (nunca el procesador)", self.cfg.gpu_only);
                 sep(o);
                 add(o, 30, "Tecla de clip…", false);
                 add(o, 31, "Tecla de captura…", false);
@@ -1819,6 +1898,19 @@ mod app {
                 43 => {
                     self.cfg.mic = !self.cfg.mic;
                     self.save_cfg();
+                    self.restart_rec();
+                }
+                48 => {
+                    self.cfg.gpu_only = !self.cfg.gpu_only;
+                    self.save_cfg();
+                    self.notify(
+                        if self.cfg.gpu_only {
+                            "Solo placa de video: si tu placa no puede comprimir, no graba (el juego no pierde nada)."
+                        } else {
+                            "Si la placa no puede, se usa el procesador (puede bajar algo de FPS en PCs lentas)."
+                        },
+                        false,
+                    );
                     self.restart_rec();
                 }
                 44 => {
@@ -2466,7 +2558,7 @@ mod app {
             };
             MAIN_HWND.store(hwnd.0 as isize, Ordering::Relaxed);
 
-            let enc = cfg.encoder;
+            let enc = logic::first_encoder(cfg.encoder, cfg.gpu_only);
             let app = App {
                 hwnd,
                 cfg,
