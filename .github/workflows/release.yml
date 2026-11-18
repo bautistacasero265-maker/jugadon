@@ -3,6 +3,10 @@ name: build-y-release
 on:
   push:
     branches: [main]
+    # el video promocional tiene su propio workflow
+    paths-ignore:
+      - "promo/**"
+      - ".github/workflows/promo.yml"
   workflow_dispatch:
 
 permissions:

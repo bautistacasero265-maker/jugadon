@@ -1,0 +1,83 @@
+name: video-promo
+
+# Genera el video promocional (vertical, con voz) en la nube y lo publica en Releases.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "promo/**"
+      - ".github/workflows/promo.yml"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: promo
+  cancel-in-progress: true
+
+jobs:
+  video:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Instalar ffmpeg, Piper (voz) y librerías
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg
+          pip install -q "piper-tts==1.2.0" pillow numpy
+
+      - name: Bajar la voz en español
+        run: |
+          mkdir -p voz
+          base=https://huggingface.co/rhasspy/piper-voices/resolve/main/es
+          # voz argentina; si no está, mexicana; si no, de España
+          for v in es_AR/daniela/high/es_AR-daniela-high es_MX/claude/high/es_MX-claude-high es_ES/davefx/medium/es_ES-davefx-medium; do
+            name=$(basename $v)
+            if curl -fsSL -o voz/$name.onnx "$base/$v.onnx" && curl -fsSL -o voz/$name.onnx.json "$base/$v.onnx.json"; then
+              echo "VOICE=voz/$name.onnx" >> $GITHUB_ENV
+              echo "Voz: $name"
+              break
+            fi
+          done
+          test -n "$(ls voz/*.onnx 2>/dev/null)"
+
+      - name: Armar el video
+        run: |
+          python promo/make_promo.py --voice "$VOICE" --out out/Jugadon-promo.mp4
+          ffprobe -v error -show_entries format=duration,size -of compact out/Jugadon-promo.mp4
+          # portada (el gancho)
+          ffmpeg -y -loglevel error -ss 1.6 -i out/Jugadon-promo.mp4 -frames:v 1 -q:v 2 out/Jugadon-promo-portada.jpg
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: video-promo
+          path: out/*
+
+      - name: Publicar en Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: promo-v${{ github.run_number }}
+          name: Video promocional de Jugadón (${{ github.run_number }})
+          target_commitish: ${{ github.sha }}
+          make_latest: false
+          files: |
+            out/Jugadon-promo.mp4
+            out/Jugadon-promo-portada.jpg
+          body: |
+            Video promocional vertical (1080×1920, ~30 s) para **TikTok, Instagram Reels y YouTube Shorts**.
+
+            - Bajá **Jugadon-promo.mp4** (abajo, en *Assets*) y subilo tal cual.
+            - **Jugadon-promo-portada.jpg** sirve de portada/miniatura.
+
+            Texto sugerido para la publicación:
+
+            > ¿Te pasó de hacer la jugada de tu vida y no estar grabando? 😭 Jugadón guarda los últimos 30 segundos con una tecla, lo comprime tu placa de video y no te baja los FPS. Gratis, sin cuentas y sin internet. Link en la bio 🎮
+            > #gaming #clips #pcgaming #valorant #fortnite #cs2 #setup #gamer #parati #fyp
+
+            Música, efectos, imágenes y voz generados automáticamente (voz: Piper TTS). La app real se descarga desde [Releases](https://github.com/${{ github.repository }}/releases/latest).
