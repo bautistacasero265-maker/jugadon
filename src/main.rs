@@ -1113,6 +1113,34 @@ mod app {
         sound: Vec<u8>,
     }
 
+    /// Cuánto duró de verdad un proceso que ya terminó (desde que arrancó hasta que salió).
+    /// Sirve para no confundir "ffmpeg falló al arrancar" con "anduvo un rato y se cortó",
+    /// aunque la app se entere varios segundos después.
+    fn real_runtime(child: &Child) -> Option<Duration> {
+        use windows::Win32::System::Threading::GetProcessTimes;
+        let (mut c, mut e, mut k, mut u) = (FILETIME::default(), FILETIME::default(), FILETIME::default(), FILETIME::default());
+        unsafe { GetProcessTimes(HANDLE(child.as_raw_handle() as _), &mut c, &mut e, &mut k, &mut u).ok()? };
+        let t = |f: FILETIME| ((f.dwHighDateTime as u64) << 32) | f.dwLowDateTime as u64;
+        let (c, e) = (t(c), t(e));
+        (e > c).then(|| Duration::from_nanos((e - c) * 100))
+    }
+
+    /// Explicación corta del último error de ffmpeg (para el aviso), mirando el final del log.
+    fn ffmpeg_hint(log: &Path) -> &'static str {
+        let tail = fs::read(log).map(|b| String::from_utf8_lossy(&b[b.len().saturating_sub(6000)..]).to_lowercase()).unwrap_or_default();
+        if tail.contains("nvenc api version") || tail.contains("driver does not support") || tail.contains("minimum required nvidia driver") {
+            " Actualizá el driver de NVIDIA: la grabación con la placa necesita uno reciente."
+        } else if tail.contains("no capable devices found") || tail.contains("openencodesessionex failed") {
+            " La placa no aceptó comprimir video (¿otro programa la está usando para grabar?)."
+        } else if tail.contains("ddagrab") || tail.contains("duplicat") || tail.contains("d3d11va device") {
+            " Windows no dejó capturar la pantalla. Actualizá el driver de video y cerrá otros grabadores."
+        } else if tail.contains("gfxcapture") {
+            " Windows no dejó capturar esa ventana (necesita Windows 10 2004 o más nuevo)."
+        } else {
+            " Mirá %TEMP%\\jugadon.log."
+        }
+    }
+
     /// Devuelve la RAM que no se está usando (en reposo queda casi en cero).
     fn trim_ram() {
         unsafe {
@@ -1494,6 +1522,7 @@ mod app {
             self.rec.next_try = None;
             self.rec.child = child;
             self.rec.audio = audio;
+            self.set_tick(2000);
             self.update_tip();
         }
 
@@ -1508,6 +1537,7 @@ mod app {
                 m.audio = audio;
                 m.started = Instant::now();
             }
+            self.set_tick(2000);
         }
 
         fn start_manual(&mut self, src: Source, what: String) {
@@ -1543,7 +1573,9 @@ mod app {
             };
             if len == 0 {
                 let _ = fs::remove_file(&m.ts);
-                self.notify("No se grabó nada (mirá %TEMP%\\jugadon.log).", true);
+                let hint = ffmpeg_hint(&self.log_path);
+                let gpu = if self.cfg.gpu_only { " Si tu placa no puede, desactivá Opciones → Usar solo la placa de video." } else { "" };
+                self.notify(&format!("No se pudo grabar.{hint}{gpu}"), true);
                 return;
             }
             self.play_sound();
@@ -1613,7 +1645,10 @@ mod app {
         fn tick(&mut self) {
             self.tick_inner();
             let busy = self.rec.child.is_some() || self.manual.is_some() || (self.cfg.bg != BG_GAMES && self.want_rec() && !self.rec.gave_up);
-            let ms = if busy { 2000 } else { 10_000 };
+            self.set_tick(if busy { 2000 } else { 10_000 });
+        }
+
+        fn set_tick(&mut self, ms: u32) {
             if ms != self.tick_ms {
                 self.tick_ms = ms;
                 unsafe {
@@ -1632,8 +1667,10 @@ mod app {
                     }
                 }
                 // ffmpeg de la grabación manual terminó solo
+                let ran = m.child.as_ref().and_then(real_runtime).unwrap_or(Duration::ZERO);
+                log_line(&self.log_path, &format!("ffmpeg (grabación) terminó después de {} s con {}", ran.as_secs(), ENCODERS[m.enc].label));
                 match logic::next_encoder(m.enc, m.tried, self.cfg.gpu_only) {
-                    Some((e, t)) if m.started.elapsed() < QUICK_DEATH => {
+                    Some((e, t)) if ran < QUICK_DEATH => {
                         m.enc = e;
                         m.tried = t;
                         self.spawn_manual();
@@ -1684,7 +1721,7 @@ mod app {
                     Ok(Some(s)) => format!("{s}"),
                     Err(e) => format!("{e}"),
                 };
-                let ran = self.rec.started.elapsed();
+                let ran = self.rec.child.as_ref().and_then(real_runtime).unwrap_or_else(|| self.rec.started.elapsed());
                 log_line(&self.log_path, &format!("ffmpeg terminó ({status}) después de {} s", ran.as_secs()));
                 self.rec.child = None;
                 if ran >= QUICK_DEATH {
@@ -1705,9 +1742,11 @@ mod app {
                             self.rec.gave_up = true;
                             log_line(&self.log_path, "ningún encoder funcionó");
                             if self.cfg.gpu_only {
-                                self.notify("Tu placa de video no pudo comprimir el video, así que no grabo (para no usar el procesador). Para grabar igual: menú → Opciones → desmarcá \"Usar solo la placa de video\".", true);
+                                let hint = ffmpeg_hint(&self.log_path);
+                                self.notify(&format!("La placa de video no pudo grabar.{hint} Para grabar igual con el procesador: Opciones → desmarcá \"Usar solo la placa de video\"."), true);
                             } else {
-                                self.notify("No pude iniciar la grabación con ningún encoder. Mirá %TEMP%\\jugadon.log", true);
+                                let hint = ffmpeg_hint(&self.log_path);
+                                self.notify(&format!("No pude iniciar la grabación.{hint}"), true);
                             }
                             self.update_tip();
                             return;
