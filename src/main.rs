@@ -319,7 +319,8 @@ mod logic {
             "0".into(),
         ]);
         if audio.is_some() {
-            a.extend(s(&["-c:a", "aac", "-b:a", if height >= 720 { "160k" } else { "128k" }]));
+            // codificador AAC "fast": mucho menos CPU que el de fábrica, misma calidad para juegos/voz
+            a.extend(s(&["-c:a", "aac", "-aac_coder", "fast", "-b:a", "128k"]));
         }
         match out {
             Out::Segments { secs, dir } => {
@@ -656,7 +657,7 @@ mod logic {
             assert!(a.contains("-thread_queue_size 128 -probesize 32 -analyzeduration 0 -f f32le -ar 48000 -ac 2 -i pipe:0 -map 0:v -map 1:a"));
             assert!(a.contains("-vf scale_d3d11=width=-2:height=min(720\\,trunc(ih/2)*2):format=nv12 -c:v h264_nvenc -preset p1 -tune ll -rc cbr"));
             assert!(a.contains("-b:v 9000k -maxrate 9000k -bufsize 18000k -g 120 -bf 0"));
-            assert!(a.contains("-c:a aac -b:a 160k"));
+            assert!(a.contains("-c:a aac -aac_coder fast -b:a 128k"));
             assert!(a.ends_with("-f segment -segment_time 2 -segment_wrap 20 -segment_format mpegts C:\\T\\jugadon_buf\\seg%03d.ts"));
             assert!(!a.contains("-nostdin"));
             assert!(!a.contains("reset_timestamps"));
@@ -903,6 +904,62 @@ mod win_tests_gdi {
         let info = String::from_utf8_lossy(&o.stdout).to_string();
         eprintln!("{info}");
         assert!(info.contains("codec_name=h264"), "{info}");
+    }
+}
+
+/// Costo fijo de ffmpeg mientras graba, sin contar el video (que en una PC real lo comprime la placa):
+/// audio por pipe + AAC + segmentos. Se mide con un video mínimo para aislarlo.
+#[cfg(all(test, windows))]
+mod win_tests_overhead {
+    use std::io::Write;
+    use std::os::windows::io::AsRawHandle;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn audio_and_mux_cpu_cost() {
+        let Ok(ff) = std::env::var("RCLIP_FFMPEG") else { return };
+        let dir = std::env::temp_dir().join("jugadon_test_overhead");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = format!("{}\\seg%03d.ts", dir.display());
+        let mut args: Vec<String> = ["-hide_banner", "-loglevel", "error", "-nostats", "-filter_threads", "1", "-f", "lavfi", "-i", "color=black:s=64x64:r=30"]
+            .iter()
+            .map(|x| x.to_string())
+            .collect();
+        // mismos argumentos de audio y salida que la app
+        let app = crate::logic::record_args(0, 720, 30, crate::logic::Source::Screen, Some((48000, 2)), crate::logic::Out::Segments { secs: 30, dir: "D" });
+        let ai = app.iter().position(|x| x == "-thread_queue_size").unwrap();
+        args.extend(app[ai..ai + 14].iter().cloned()); // -thread_queue_size ... -i pipe:0
+        args.extend(["-map", "0:v", "-map", "1:a", "-c:v", "libx264", "-preset", "ultrafast", "-g", "60"].iter().map(|x| x.to_string()));
+        let ca = app.iter().position(|x| x == "-c:a").unwrap();
+        args.extend(app[ca..ca + 6].iter().cloned());
+        args.extend(["-f", "segment", "-segment_time", "2", "-segment_wrap", "20", "-segment_format", "mpegts", &out].iter().map(|x| x.to_string()));
+        eprintln!("args: {}", args.join(" "));
+        let (r, mut w) = crate::audio::small_pipe().unwrap();
+        let mut child = Command::new(&ff).args(&args).stdin(Stdio::from(r)).stdout(Stdio::null()).spawn().unwrap();
+        let t0 = Instant::now();
+        let mut frames = 0u64;
+        let block = vec![0u8; 1920 * 2 * 4]; // 40 ms de audio, como el hilo de la app
+        while t0.elapsed() < Duration::from_secs(10) {
+            w.write_all(&block).unwrap();
+            frames += 1920;
+            if let Some(d) = Duration::from_micros(frames * 1_000_000 / 48000).checked_sub(t0.elapsed()) {
+                std::thread::sleep(d);
+            }
+        }
+        use windows::Win32::Foundation::{FILETIME, HANDLE};
+        use windows::Win32::System::Threading::GetProcessTimes;
+        let (mut a, mut b, mut k, mut u) = (FILETIME::default(), FILETIME::default(), FILETIME::default(), FILETIME::default());
+        unsafe {
+            let _ = GetProcessTimes(HANDLE(child.as_raw_handle() as _), &mut a, &mut b, &mut k, &mut u);
+        }
+        let t = |f: FILETIME| ((f.dwHighDateTime as u64) << 32 | f.dwLowDateTime as u64) as f64 / 10_000.0;
+        let cpu = t(k) + t(u);
+        let wall = t0.elapsed().as_millis() as f64;
+        let _ = child.kill();
+        let _ = child.wait();
+        eprintln!("Costo fijo de ffmpeg (audio AAC + segmentos, sin el video): {:.1} % de un núcleo", cpu / wall * 100.0);
     }
 }
 
@@ -2630,7 +2687,7 @@ mod audio {
     const AUTOCONVERT: u32 = 0x8000_0000;
     const SRC_QUALITY: u32 = 0x0800_0000;
     const SILENT: u32 = 0x2;
-    const BUFFER_HNS: i64 = 2_000_000; // 200 ms
+    const BUFFER_HNS: i64 = 4_000_000; // 400 ms (el hilo se despierta cada 40 ms)
     const FLOAT_GUID: [u8; 16] = [3, 0, 0, 0, 0, 0, 0x10, 0, 0x80, 0, 0, 0xaa, 0, 0x38, 0x9b, 0x71];
 
     pub struct Audio {
@@ -2826,17 +2883,18 @@ mod audio {
             s.read(); // lo capturado antes de arrancar se descarta
             s.q.clear();
         }
-        // El audio se escribe atado al reloj de pared, con 30 ms de colchón para el jitter.
+        // El audio se escribe atado al reloj de pared, con 60 ms de colchón para el jitter.
         // Si una fuente no manda nada (loopback en silencio), va silencio; si se atrasa, se recorta.
-        let lag = ms(30);
-        let max_q = ms(120) as usize * chs;
+        let lag = ms(60);
+        let max_q = ms(200) as usize * chs;
         let t0 = Instant::now();
         let mut written: u64 = 0;
         let mut last_check = Instant::now();
         let mut out: Vec<f32> = Vec::new();
 
         loop {
-            thread::sleep(Duration::from_millis(20));
+            // 25 veces por segundo alcanza (el audio se junta en bloques de 40 ms)
+            thread::sleep(Duration::from_millis(40));
             if last_check.elapsed() >= Duration::from_secs(1) {
                 last_check = Instant::now();
                 for s in sources.iter_mut() {

@@ -90,7 +90,8 @@ La configuración está en `%APPDATA%\Jugadon\config.ini`. Ahí también se pued
 - **Todo el video se procesa en la placa de video, no en el procesador.** Captura con Desktop Duplication (`ddagrab`), escala a 720p en la GPU (`scale_d3d11`) y comprime con el chip de video dedicado de la placa: **NVENC** (NVIDIA), **AMF** (AMD) o **QSV** (Intel). Ese chip es aparte de lo que usa el juego para dibujar.
 - **El juego siempre tiene prioridad.** ffmpeg graba con prioridad "debajo de lo normal". Guardar un clip y sacar una captura van con prioridad "baja". Si la CPU está al 100 %, el que cede es el clip (algún cuadro repetido), no el juego.
 - **Guardar no recomprime.** Los últimos segundos están en el disco en pedazos de 2 s (`%TEMP%\jugadon_buf`). Al apretar F9 solo se unen en un `.mp4` (copia directa). Por eso no hay tirón al guardar.
-- **Poco trabajo de fondo.** Hay un solo hilo de filtros y un hilo de audio que se despierta cada 20 ms (solo mientras graba). El chequeo de que ffmpeg siga vivo corre cada 2 s.
+- **Audio liviano.** El audio se comprime con el modo rápido de AAC, que usa mucho menos procesador. El hilo de audio de Jugadón se despierta 25 veces por segundo y solo copia datos.
+- **Poco trabajo de fondo.** Hay un solo hilo de filtros y un hilo de audio que se despierta cada 40 ms (solo mientras graba). El chequeo de que ffmpeg siga vivo corre cada 2 s.
 - **Nada en RAM.** El buffer está en el disco: ocupa unos 1,5 MB por cada 2 s a 30 fps (unos 230 MB con 5 min) y se borra al salir.
 - Si la GPU no puede codificar, Jugadón pasa solo a otra opción. La última es x264 en CPU, y esa **sí** consume CPU. Si pasa eso, el ícono lo dice.
 

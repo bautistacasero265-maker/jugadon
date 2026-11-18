@@ -148,8 +148,8 @@ jobs:
       - name: Publicar release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.8.${{ github.run_number }}
-          name: Jugadón v0.8.${{ github.run_number }}
+          tag_name: v0.9.${{ github.run_number }}
+          name: Jugadón v0.9.${{ github.run_number }}
           target_commitish: ${{ github.sha }}
           prerelease: ${{ github.ref_name != github.event.repository.default_branch }}
           files: Jugadon-windows-x64.zip
