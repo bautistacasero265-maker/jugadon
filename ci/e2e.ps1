@@ -225,6 +225,22 @@ try {
   Start-Sleep -Seconds 1
   Check ((Clipboard-Files) -match '\.(mp4|png)') "botón Copiar de la tarjeta"
   GCmd 207
+  # Acortar: dejar los últimos 10 s de un clip (crea una copia)
+  GCmd 241
+  GCmd 210
+  $n = (Files '*_ultimos10s.mp4').Count
+  GCmd 250
+  $f = Wait-New '*_ultimos10s.mp4' $n 30
+  Check-Video $f 6 "Acortar → últimos 10 s"
+  if ($f) { $p = Probe $f; Check ($p.Dur -le 13) "el clip acortado dura como mucho ~10 s" }
+  GCmd 240
+  # Tab recorre secciones y botones; Enter sobre "Capturas" cambia de sección
+  foreach ($i in 1..4) { [void][W]::PostMessage($script:gal, 0x100, [IntPtr]0x09, [IntPtr]::Zero) }
+  [void][W]::PostMessage($script:gal, 0x100, [IntPtr]0x0D, [IntPtr]::Zero)
+  Start-Sleep -Seconds 1
+  Snap $script:gal 'galeria_teclado.png'
+  Check (Responding $script:gal) "Tab y Enter en la ventana"
+  GCmd 240
   # tecla Abajo/Fin (moverse entre tarjetas)
   foreach ($vk in 0x28, 0x27, 0x23, 0x24) { [void][W]::PostMessage($script:gal, 0x100, [IntPtr]$vk, [IntPtr]::Zero) }
   Start-Sleep -Seconds 1

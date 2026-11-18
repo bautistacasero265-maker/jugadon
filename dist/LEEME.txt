@@ -30,7 +30,9 @@ Al guardar suena un "tin-tin" y aparece un aviso: tocalo para ver el clip.
 Menú -> "Copiar último clip" y lo pegás con Ctrl+V en Discord o WhatsApp.
 
 Clic IZQUIERDO en el ícono: ventana "Mis clips" (abrir, compartir, copiar
-para Discord, borrar). Cerrala con la X: Jugadón sigue en la bandeja.
+para Discord, acortar, borrar). Clic derecho en un clip -> "Acortar" deja
+solo los últimos segundos en una copia. Cerrala con la X: Jugadón sigue en
+la bandeja. También se maneja con el teclado (Tab, flechas, Enter, Supr).
 
 Clic DERECHO en el ícono para abrir el menú. Ahí podés:
   - cambiar la duración (15 s a 5 min)

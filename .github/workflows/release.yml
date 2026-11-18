@@ -256,6 +256,77 @@ jobs:
             Jugadon-windows-x64.zip
             ventana.png
 
+  # La misma prueba completa en Windows Server 2022 (base de Windows 10 21H2): que ande también en PCs más viejas.
+  compat:
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Bajar FFmpeg 8.1
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ok = $false
+          foreach ($v in $env:FFMPEG_CANDIDATES.Split(' ')) {
+            $url = "https://github.com/GyanD/codexffmpeg/releases/download/$v/ffmpeg-$v-essentials_build.zip"
+            try {
+              Invoke-WebRequest -Uri $url -OutFile ffmpeg.zip
+              Write-Host "Bajado FFmpeg $v de $url"
+              "FFMPEG_VERSION=$v" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+              $ok = $true
+              break
+            } catch {
+              Write-Host "No existe $v"
+            }
+          }
+          if (-not $ok) {
+            Write-Host "Ninguna versión de la lista. Disponibles:"
+            gh release list -R GyanD/codexffmpeg -L 15
+            throw "No se pudo bajar FFmpeg"
+          }
+          (Get-FileHash ffmpeg.zip -Algorithm SHA256).Hash
+          Expand-Archive ffmpeg.zip -DestinationPath ffx
+          $dir = Get-ChildItem ffx -Directory | Select-Object -First 1
+          Move-Item $dir.FullName ffmpeg
+          Get-ChildItem ffmpeg, ffmpeg\bin
+
+      - name: Tests
+        run: |
+          $env:RCLIP_FFMPEG = (Resolve-Path ffmpeg\bin\ffmpeg.exe).Path
+          cargo test --release
+
+      - name: Compilar
+        run: |
+          cargo build --release
+          New-Item -ItemType Directory Jugadon | Out-Null
+          Copy-Item target\release\jugadon.exe, ffmpeg\bin\ffmpeg.exe Jugadon\
+
+      - name: Prueba completa de la app en Windows Server 2022
+        timeout-minutes: 25
+        run: ./ci/e2e.ps1
+
+      - name: Subir fotos
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: prueba-completa-2022
+          path: e2e/*.png
+          if-no-files-found: ignore
+
+  # Se publica solo si la prueba completa pasó en las dos versiones de Windows.
+  publish:
+    needs: [windows, compat]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: Jugadon-windows-x64
+
       - name: Publicar release
         id: rel
         continue-on-error: true
@@ -288,7 +359,7 @@ jobs:
 
       - name: Esperar y reintentar la publicación
         if: steps.rel.outcome == 'failure'
-        run: Start-Sleep -Seconds 30
+        run: sleep 30
 
       - name: Publicar release (reintento)
         if: steps.rel.outcome == 'failure'

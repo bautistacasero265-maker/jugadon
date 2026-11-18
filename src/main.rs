@@ -386,6 +386,18 @@ mod logic {
         s(&["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i", input, "-map", "0", "-c", "copy", "-movflags", "+faststart", out])
     }
 
+    /// Acortar un video a sus últimos `secs` segundos sin recomprimir (instantáneo, casi sin CPU).
+    pub fn trim_args(input: &str, secs: u32, out: &str) -> Vec<String> {
+        let from = format!("-{secs}");
+        s(&["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-sseof", &from, "-i", input, "-map", "0", "-c", "copy", "-avoid_negative_ts", "make_zero", "-movflags", "+faststart", out])
+    }
+
+    /// "clip_2026-11-18_22-21-15.mp4" -> "clip_2026-11-18_22-21-15_ultimos15s.mp4"
+    pub fn trimmed_name(name: &str, secs: u32) -> String {
+        let stem = name.rsplit_once('.').map_or(name, |x| x.0);
+        format!("{stem}_ultimos{secs}s.mp4")
+    }
+
     /// "1:05:09" / "3:07"
     pub fn fmt_elapsed(secs: u64) -> String {
         let (h, m, s) = (secs / 3600, secs / 60 % 60, secs % 60);
@@ -767,6 +779,10 @@ mod logic {
             let r = remux_args("a.ts", "b.mp4").join(" ");
             assert!(r.contains("-i a.ts -map 0 -c copy -movflags +faststart b.mp4"));
             assert_eq!(fmt_elapsed(187), "3:07");
+            let t = trim_args("a.mp4", 15, "b.mp4").join(" ");
+            assert!(t.contains("-sseof -15 -i a.mp4 -map 0 -c copy") && t.ends_with("+faststart b.mp4"));
+            assert_eq!(trimmed_name("clip_2026-11-18_22-21-15.mp4", 15), "clip_2026-11-18_22-21-15_ultimos15s.mp4");
+            assert_eq!(describe_file(&trimmed_name("clip_2026-11-18_22-21-15.mp4", 30)), ("Clip", "18/11/2026 22:21".to_string()));
             assert_eq!(fmt_elapsed(3909), "1:05:09");
         }
 
@@ -2249,6 +2265,7 @@ mod app {
                     tx: Some(tx),
                     drag: None,
                     tracking: false,
+                    focus: None,
                 });
                 self.fill_gallery();
                 // refresco del reloj de grabación y del estado (solo mientras la ventana está abierta)
@@ -2305,6 +2322,32 @@ mod app {
             }
         }
 
+        fn trim_selected(&self, secs: u32) {
+            let Some(f) = self.selected_file() else {
+                self.notify("Elegí un clip de la lista primero.", false);
+                return;
+            };
+            if !f.extension().is_some_and(|x| x.eq_ignore_ascii_case("mp4")) {
+                self.notify("Solo se pueden acortar videos.", false);
+                return;
+            }
+            let name = f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let out = f.with_file_name(logic::trimmed_name(&name, secs));
+            let (ffmpeg, log) = (self.ffmpeg.clone(), self.log_path.clone());
+            std::thread::spawn(move || {
+                let args = logic::trim_args(&f.to_string_lossy(), secs, &out.to_string_lossy());
+                let mut cmd = Command::new(ffmpeg);
+                cmd.args(&args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(log_stdio(&log));
+                let ok = spawn_hidden(&mut cmd, IDLE).and_then(|mut c| c.wait()).is_ok_and(|s| s.success());
+                if ok {
+                    post_text(format!("Listo: quedaron los últimos {secs} s en un clip nuevo (el original no se tocó)."), Some(out.to_string_lossy().into_owned()));
+                } else {
+                    let _ = fs::remove_file(&out);
+                    post_text("No pude acortar el clip (mirá jugadon.log).".to_string(), None);
+                }
+            });
+        }
+
         fn selected_file(&self) -> Option<PathBuf> {
             let g = self.gallery.as_ref()?;
             g.items.get(g.sel?).map(|i| i.path.clone())
@@ -2320,6 +2363,11 @@ mod app {
                 }
                 207 => {
                     self.fill_gallery();
+                    return;
+                }
+                // dejar solo los últimos 10/15/30/60 s (sin recomprimir)
+                250..=253 => {
+                    self.trim_selected([10, 15, 30, 60][id - 250]);
                     return;
                 }
                 // prueba automática: elegir la tarjeta N de lo que se ve
@@ -2392,6 +2440,16 @@ mod app {
         fn gallery_click(&mut self, x: i32, y: i32, double: bool) -> Option<Outside> {
             let g = self.gallery.as_mut()?;
             let hit = g.hit_at(x, y);
+            if g.focus.is_some() {
+                g.focus = None;
+                g.redraw();
+            }
+            self.gallery_activate(hit, double, y)
+        }
+
+        /// Lo que hace cada parte de la ventana (con el mouse o con Enter/Espacio).
+        fn gallery_activate(&mut self, hit: Hit, double: bool, y: i32) -> Option<Outside> {
+            let g = self.gallery.as_mut()?;
             match hit {
                 Hit::Nav(n) => g.set_nav(n),
                 Hit::Card(i) => {
@@ -2535,6 +2593,8 @@ mod app {
         tx: Option<std::sync::mpsc::Sender<(u64, usize, PathBuf)>>,
         drag: Option<i32>,
         tracking: bool,
+        /// foco del teclado (Tab): sección, botón o las tarjetas (Card(usize::MAX))
+        focus: Option<Hit>,
     }
 
     const NAV: [(&str, u16); 4] = [("Todo", 0xE8A9), ("Clips", 0xE714), ("Grabaciones", 0xE7C8), ("Capturas", 0xEB9F)];
@@ -2665,6 +2725,24 @@ mod app {
             } else if top + ch > self.scroll + self.page_h {
                 self.scroll = (top + ch - self.page_h).min(self.max_scroll());
             }
+        }
+
+        /// Orden del Tab: secciones, botones de la barra, tarjetas.
+        fn tab(&mut self, back: bool) {
+            let order: Vec<Hit> = (0..4).map(Hit::Nav).chain([Hit::Btn(0), Hit::Btn(1), Hit::Btn(2), Hit::Btn(3), Hit::Card(usize::MAX)]).collect();
+            let cur = self.focus.and_then(|f| order.iter().position(|&h| h == f));
+            let n = order.len();
+            let next = match (cur, back) {
+                (None, false) => 0,
+                (None, true) => n - 1,
+                (Some(i), false) => (i + 1) % n,
+                (Some(i), true) => (i + n - 1) % n,
+            };
+            self.focus = Some(order[next]);
+            if order[next] == Hit::Card(usize::MAX) && self.sel.is_none() {
+                self.sel = self.view.first().copied();
+            }
+            self.redraw();
         }
 
         fn key(&mut self, vk: u16) -> Option<usize> {
@@ -2816,21 +2894,27 @@ mod app {
             // ---------- contenido ----------
             let cx0 = sw + s(32);
             let cx1 = w - s(28);
+            // resplandor de color arriba (decoración: un degradé, sin imágenes)
+            grad_in(dc, rc(sw, 0, w, s(150)), CreateRectRgn(sw, 0, w, s(150)), rgb(38, 20, 46), BG_COLOR, true);
             let title = NAV[self.nav as usize].0;
-            text(dc, if self.nav == 0 { "Mis clips" } else { title }, rc(cx0, s(18), cx1, s(56)), self.fonts.h1, TEXT, DT_SINGLELINE | DT_VCENTER);
+            let title = if self.nav == 0 { "Mis clips" } else { title };
+            text(dc, title, rc(cx0, s(14), cx1, s(52)), self.fonts.h1, TEXT, DT_SINGLELINE | DT_VCENTER);
+            let tw_ = text_w(dc, self.fonts.h1, title);
+            grad_round(dc, rc(cx0 + tw_ + s(12), s(30), cx0 + tw_ + s(40), s(36)), s(6), ORANGE, PINK, false);
+            // datos y atajos en "pastillas"
             let n = self.view.len();
             let size: u64 = self.view.iter().map(|&i| self.items[i].size).sum();
-            let sub = format!(
-                "{n} {}  ·  {}     {} guarda los últimos {}  ·  {} graba  ·  {} captura",
-                if n == 1 { "archivo" } else { "archivos" },
-                logic::fmt_size(size),
-                keys.0,
-                logic::fmt_elapsed(secs as u64),
-                keys.1,
-                keys.2
-            );
-            text(dc, &sub, rc(cx0, s(56), cx1, s(78)), self.fonts.body, MUTED, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
-            let top = s(96);
+            let mut x = cx0;
+            let cy = (s(58), s(84));
+            let info = format!("{n} {}  ·  {}", if n == 1 { "archivo" } else { "archivos" }, logic::fmt_size(size));
+            x = chip(dc, x, cy, None, &info, self.fonts.small, s) + s(14);
+            for (k, what) in [(&keys.0, format!("guardar últimos {}", logic::fmt_elapsed(secs as u64))), (&keys.1, "grabar".to_string()), (&keys.2, "captura".to_string())] {
+                if x + s(150) > cx1 {
+                    break;
+                }
+                x = chip(dc, x, cy, Some(k), &what, self.fonts.small, s) + s(8);
+            }
+            let top = s(100);
             let page = rc(cx0, top, cx1, h);
             self.page_h = (h - top).max(1);
             self.visible.clear();
@@ -2840,6 +2924,8 @@ mod app {
                 self.scroll = 0;
                 let mid = (cx0 + cx1) / 2;
                 let cy = top + (h - top) / 2 - s(90);
+                ellipse(dc, rc(mid - s(86), cy - s(38), mid + s(86), cy + s(134)), rgb(26, 22, 36));
+                ellipse(dc, rc(mid - s(68), cy - s(20), mid + s(68), cy + s(116)), rgb(36, 28, 50));
                 let _ = DrawIconEx(dc, mid - s(48), cy, self.logo, s(96), s(96), 0, None, DI_NORMAL);
                 let (t1, t2) = match self.nav {
                     3 => ("Todavía no hay capturas", format!("Apretá {} y se guarda una foto de la pantalla.", keys.2)),
@@ -2848,6 +2934,7 @@ mod app {
                 };
                 text(dc, t1, rc(cx0, cy + s(108), cx1, cy + s(140)), self.fonts.h1, TEXT, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
                 text(dc, &t2, rc(cx0, cy + s(142), cx1, cy + s(166)), self.fonts.body, MUTED, DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_END_ELLIPSIS);
+                self.paint_focus(dc, s(2));
                 return;
             }
 
@@ -2869,7 +2956,7 @@ mod app {
                 let (row, col) = ((pos / cols) as i32, (pos % cols) as i32);
                 let x = cx0 + col * (cw + gap);
                 let y = top + row * (ch + gap) - self.scroll;
-                if y + ch < top || y > h {
+                if y + ch < top - s(8) || y > h {
                     continue;
                 }
                 self.visible.push(idx);
@@ -2881,6 +2968,8 @@ mod app {
                 let hovered = matches!(self.hover, Hit::Card(i) | Hit::Play(i) | Hit::Act(i, _) if i == idx);
                 let selected = self.sel == Some(idx);
                 // tarjeta
+                // sombra suave
+                shade_round(dc, rc(r.left + s(2), r.top + s(5), r.right + s(2), r.bottom + s(6)), s(16), 0, 90);
                 if selected {
                     grad_round(dc, rc(r.left - s(3), r.top - s(3), r.right + s(3), r.bottom + s(3)), s(16), ORANGE, PINK, false);
                 }
@@ -2948,6 +3037,18 @@ mod app {
                             shade_round(dc, ar, s(32), 0, 170);
                         }
                         glyph_at(dc, glyph, ar, self.fonts.icon, TEXT);
+                        if ah {
+                            // etiqueta de qué hace el botón
+                            let label = match cmd {
+                                205 => "Eliminar",
+                                203 => "Copiar",
+                                _ => "Compartir",
+                            };
+                            let lw = text_w(dc, self.fonts.small, label) + s(16);
+                            let lr = rc((ar.left + ar.right - lw) / 2, ar.bottom + s(6), (ar.left + ar.right + lw) / 2, ar.bottom + s(28));
+                            shade_round(dc, lr, s(10), 0, 210);
+                            text(dc, label, lr, self.fonts.small, TEXT, DT_SINGLELINE | DT_VCENTER | DT_CENTER);
+                        }
                         self.hits.push((ar, Hit::Act(idx, cmd)));
                         ax -= s(38);
                     }
@@ -2971,12 +3072,29 @@ mod app {
                 round(dc, rc(track.left, ty, track.right, ty + th_), s(6), if active { ORANGE } else { rgb(70, 64, 92) });
                 self.hits.push((rc(track.left - s(6), track.top, track.right + s(4), track.bottom), Hit::Bar));
             }
+            self.paint_focus(dc, s(2));
             for idx in asks {
                 self.items[idx].asked = true;
                 if let Some(tx) = &self.tx {
                     let _ = tx.send((self.gen, idx, self.items[idx].path.clone()));
                 }
             }
+        }
+    }
+
+    impl Gallery {
+        /// Anillo blanco alrededor de lo que tiene el foco del teclado (Tab).
+        unsafe fn paint_focus(&self, dc: HDC, wd: i32) {
+            let Some(f) = self.focus else { return };
+            let target = if f == Hit::Card(usize::MAX) { self.sel.map(Hit::Card) } else { Some(f) };
+            let Some(r) = target.and_then(|t| self.hits.iter().find(|h| h.1 == t)).map(|h| h.0) else { return };
+            let pen = CreatePen(PS_SOLID, wd, COLORREF(TEXT));
+            let op = SelectObject(dc, pen.into());
+            let ob = SelectObject(dc, GetStockObject(NULL_BRUSH));
+            let _ = RoundRect(dc, r.left - wd * 2, r.top - wd * 2, r.right + wd * 2, r.bottom + wd * 2, wd * 7, wd * 7);
+            SelectObject(dc, ob);
+            SelectObject(dc, op);
+            let _ = DeleteObject(pen.into());
         }
     }
 
@@ -3087,6 +3205,32 @@ mod app {
         SelectObject(dc, old);
     }
 
+    unsafe fn text_w(dc: HDC, font: HFONT, s: &str) -> i32 {
+        let old = SelectObject(dc, font.into());
+        let t: Vec<u16> = s.encode_utf16().collect();
+        let mut sz = SIZE::default();
+        let _ = GetTextExtentPoint32W(dc, &t, &mut sz);
+        SelectObject(dc, old);
+        sz.cx
+    }
+
+    /// Pastilla con texto (y una tecla dibujada como tecla, si hay). Devuelve dónde termina.
+    unsafe fn chip(dc: HDC, x: i32, (t, b): (i32, i32), key: Option<&str>, label: &str, font: HFONT, s: impl Fn(i32) -> i32) -> i32 {
+        let kw = key.map_or(0, |k| text_w(dc, font, k) + s(14));
+        let lw = text_w(dc, font, label);
+        let r = rc(x, t, x + s(10) + kw + lw + s(12), b);
+        round(dc, r, s(12), rgb(30, 27, 42));
+        let mut tx = r.left + s(10);
+        if let Some(k) = key {
+            let kr = rc(tx - s(4), t + s(4), tx - s(4) + kw, b - s(4));
+            round(dc, kr, s(6), rgb(58, 50, 80));
+            text(dc, k, kr, font, TEXT, DT_SINGLELINE | DT_VCENTER | DT_CENTER);
+            tx += kw + s(2);
+        }
+        text(dc, label, rc(tx, t, r.right, b), font, MUTED, DT_SINGLELINE | DT_VCENTER);
+        r.right
+    }
+
     unsafe fn glyph_at(dc: HDC, g: u16, r: RECT, font: HFONT, c: u32) {
         let old = SelectObject(dc, font.into());
         SetTextColor(dc, COLORREF(c));
@@ -3188,14 +3332,23 @@ mod app {
     }
 
     /// Menú del clic derecho sobre una tarjeta.
-    unsafe fn card_menu(hwnd: HWND) -> usize {
+    unsafe fn card_menu(hwnd: HWND, video: bool) -> usize {
         let m = CreatePopupMenu().unwrap_or_default();
-        for (id, t) in [(201usize, "Abrir"), (202, "Compartir…"), (203, "Copiar (para pegar en Discord o WhatsApp)"), (204, "Mostrar en carpeta")] {
+        for (id, t) in [(201usize, "Abrir\tEnter"), (202, "Compartir…"), (203, "Copiar (para pegar en Discord o WhatsApp)\tCtrl+C"), (204, "Mostrar en carpeta")] {
             let t = wide(t);
             let _ = AppendMenuW(m, MF_STRING, id, PCWSTR(t.as_ptr()));
         }
+        if video {
+            let sub = CreatePopupMenu().unwrap_or_default();
+            for (i, t) in ["Últimos 10 segundos", "Últimos 15 segundos", "Últimos 30 segundos", "Último minuto"].iter().enumerate() {
+                let t = wide(t);
+                let _ = AppendMenuW(sub, MF_STRING, 250 + i, PCWSTR(t.as_ptr()));
+            }
+            let t = wide("Acortar (crea una copia)");
+            let _ = AppendMenuW(m, MF_POPUP, sub.0 as usize, PCWSTR(t.as_ptr()));
+        }
         let _ = AppendMenuW(m, MF_SEPARATOR, 0, PCWSTR::null());
-        let t = wide("Eliminar");
+        let t = wide("Eliminar\tSupr");
         let _ = AppendMenuW(m, MF_STRING, 205, PCWSTR(t.as_ptr()));
         let mut pt = POINT::default();
         let _ = GetCursorPos(&mut pt);
@@ -3318,15 +3471,15 @@ mod app {
                         Hit::Card(i) | Hit::Play(i) | Hit::Act(i, _) => {
                             g.sel = Some(i);
                             g.redraw();
-                            Some(())
+                            Some(g.items[i].kind != 2)
                         }
                         _ => None,
                     }
                 })
                 .flatten();
-                if on_card.is_some() {
+                if let Some(video) = on_card {
                     let _ = UpdateWindow(hwnd);
-                    let cmd = card_menu(hwnd);
+                    let cmd = card_menu(hwnd, video);
                     if cmd != 0 {
                         with_app(|a| a.gallery_cmd(cmd));
                     }
@@ -3346,14 +3499,47 @@ mod app {
             WM_KEYDOWN => {
                 let vk = wp.0 as u16;
                 let ctrl = GetKeyState(VK_CONTROL.0 as i32) < 0;
-                with_app(|a| {
-                    let cmd = if ctrl && vk == b'C' as u16 { Some(203) } else { a.gallery.as_mut().and_then(|g| g.key(vk)) };
+                let shift = GetKeyState(VK_SHIFT.0 as i32) < 0;
+                // tecla de menú o Shift+F10: el menú de la tarjeta elegida
+                if vk == 0x5D || (shift && vk == 0x79) {
+                    let video = with_app(|a| a.gallery.as_ref().and_then(|g| g.sel.map(|i| g.items[i].kind != 2))).flatten();
+                    if let Some(video) = video {
+                        let cmd = card_menu(hwnd, video);
+                        if cmd != 0 {
+                            with_app(|a| a.gallery_cmd(cmd));
+                        }
+                    }
+                    return LRESULT(0);
+                }
+                let out = with_app(|a| {
+                    let g = a.gallery.as_mut()?;
+                    if vk == 0x09 {
+                        g.tab(shift);
+                        return None;
+                    }
+                    // Enter/Espacio sobre una sección o un botón con foco
+                    if matches!(vk, 0x0D | 0x20) {
+                        if let Some(f) = g.focus.filter(|f| *f != Hit::Card(usize::MAX)) {
+                            return a.gallery_activate(f, false, 0);
+                        }
+                    }
+                    if g.focus.is_some_and(|f| f != Hit::Card(usize::MAX)) && matches!(vk, 0x25..=0x28) {
+                        g.focus = Some(Hit::Card(usize::MAX));
+                    }
+                    let cmd = if ctrl && vk == b'C' as u16 { Some(203) } else { g.key(vk) };
                     if let Some(c) = cmd {
                         a.gallery_cmd(c);
                     }
-                });
+                    None
+                })
+                .flatten();
+                if let Some(Outside::Menu) = out {
+                    show_menu(HWND(MAIN_HWND.load(Ordering::Relaxed) as _));
+                    with_app(|a| a.fill_gallery());
+                }
                 LRESULT(0)
             }
+            WM_GETDLGCODE => LRESULT(DLGC_WANTALLKEYS as isize),
             WM_COMMAND => {
                 let id = wp.0 & 0xFFFF;
                 with_app(|a| a.gallery_cmd(id));

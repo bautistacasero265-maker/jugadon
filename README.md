@@ -57,8 +57,8 @@ Se abre con **clic izquierdo** en el ícono (o con `jugadon.exe --clips`, útil 
 
 - **Barra lateral**: secciones Todo / Clips / Grabaciones / Capturas con su cantidad, botón grande **Grabar pantalla** (se pone rojo con el reloj mientras grabás y sirve para frenar), **Guardar clip**, **Abrir carpeta**, **Ajustes** (el mismo menú del ícono) y el estado actual.
 - **Tarjetas grandes** con miniatura, etiqueta de color (clip, grabación, captura) y duración. Al pasar el mouse aparecen el botón **▶** y los botones rápidos **Compartir**, **Copiar** (para pegar con Ctrl+V en Discord o WhatsApp) y **Eliminar** (va a la papelera).
-- **Clic derecho** en una tarjeta: Abrir, Compartir, Copiar, Mostrar en carpeta, Eliminar. **Doble clic** abre el video.
-- **Teclado**: flechas para moverte, Enter abre, Supr elimina, Ctrl+C copia, F5 actualiza.
+- **Clic derecho** en una tarjeta: Abrir, Compartir, Copiar, Mostrar en carpeta, **Acortar** (deja solo los últimos 10 s, 15 s, 30 s o 1 minuto en una copia, al instante y sin perder calidad) y Eliminar. **Doble clic** abre el video.
+- **Todo con teclado**: Tab recorre las secciones y los botones, flechas para moverte entre clips, Enter abre, Supr elimina, Ctrl+C copia, tecla de menú (o Shift+F10) abre las opciones del clip, F5 actualiza. Lo que tiene el foco se marca con un borde blanco.
 
 Está dibujada a mano por Jugadón, en Rust, con lo básico de Windows (GDI): sin navegador por dentro y sin librerías de interfaz. Solo carga las miniaturas que se ven (como mucho 36 en memoria, con prioridad baja) y **cerrarla con la X la libera entera**; Jugadón sigue en la bandeja.
 
@@ -125,7 +125,7 @@ Si pasás el mouse por el ícono, te dice cuál está usando. Con drivers sin la
 
 ## Compilación
 
-Todo se compila en GitHub Actions (`.github/workflows/release.yml`) con cada cambio en `main`. El workflow corre los tests, incluidas grabaciones reales con ffmpeg, y una **prueba completa** (`ci/e2e.ps1`) que abre la app de verdad en Windows. Esa prueba aprieta F9, F10 y F8, graba una ventana y usa cada opción del menú con la ventana "Mis clips" cerrada y abierta. También corta la app de golpe en medio de una grabación, comprueba que se recupere y verifica con `ffprobe` que cada archivo sea un video válido. Si algo falla, no se publica. Compila `jugadon.exe` con su ícono y baja FFmpeg 8.1, verificando que tenga `ddagrab`, `gfxcapture`, `scale_d3d11`, NVENC, AMF, QSV y x264. Después mide la RAM en reposo, le saca una foto a la ventana "Mis clips" y publica el zip en Releases. El ícono y el banner se generan con `assets/make_assets.py`.
+Todo se compila en GitHub Actions (`.github/workflows/release.yml`) con cada cambio en `main`. El workflow corre los tests, incluidas grabaciones reales con ffmpeg, y una **prueba completa** (`ci/e2e.ps1`) que abre la app de verdad en Windows 11/Server 2025 y en Windows Server 2022 (base de Windows 10). Esa prueba aprieta F9, F10 y F8, graba una ventana y usa cada opción del menú con la ventana "Mis clips" cerrada y abierta. También corta la app de golpe en medio de una grabación, comprueba que se recupere y verifica con `ffprobe` que cada archivo sea un video válido. Si algo falla, no se publica. Compila `jugadon.exe` con su ícono y baja FFmpeg 8.1, verificando que tenga `ddagrab`, `gfxcapture`, `scale_d3d11`, NVENC, AMF, QSV y x264. Después mide la RAM en reposo, le saca una foto a la ventana "Mis clips" y publica el zip en Releases. El ícono y el banner se generan con `assets/make_assets.py`.
 
 ## Licencias
 
