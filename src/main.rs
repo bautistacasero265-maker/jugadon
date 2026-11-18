@@ -40,6 +40,8 @@ mod logic {
         pub sound: bool,
         /// comprimir solo con la placa de video (NVENC/AMF/QSV); nunca x264 en el procesador
         pub gpu_only: bool,
+        /// versión en la que se probó cómo grabar (vacío = falta probar)
+        pub probed: String,
     }
 
     impl Config {
@@ -57,6 +59,7 @@ mod logic {
                 mic: true,
                 sound: true,
                 gpu_only: false,
+                probed: String::new(),
             }
         }
 
@@ -89,6 +92,7 @@ mod logic {
                     ("mic", Some(n)) if n <= 1 && v2 => c.mic = n == 1,
                     ("sound", Some(n)) if n <= 1 => c.sound = n == 1,
                     ("gpu_only", Some(n)) if n <= 1 && v3 => c.gpu_only = n == 1,
+                    ("probed", _) if v3 => c.probed = v.to_string(),
                     _ => {}
                 }
             }
@@ -102,7 +106,7 @@ mod logic {
 
         pub fn serialize(&self) -> String {
             format!(
-                "version=3\nseconds={}\nfps={}\nquality={}\nclip_key={}\nclip_mods={}\nshot_key={}\nshot_mods={}\nfolder={}\nencoder={}\nbg={}\nrec_key={}\nrec_mods={}\nmic={}\nsound={}\ngpu_only={}\n",
+                "version=3\nseconds={}\nfps={}\nquality={}\nclip_key={}\nclip_mods={}\nshot_key={}\nshot_mods={}\nfolder={}\nencoder={}\nbg={}\nrec_key={}\nrec_mods={}\nmic={}\nsound={}\ngpu_only={}\nprobed={}\n",
                 self.secs,
                 self.fps,
                 self.height,
@@ -117,7 +121,8 @@ mod logic {
                 self.rec.mods,
                 self.mic as u8,
                 self.sound as u8,
-                self.gpu_only as u8
+                self.gpu_only as u8,
+                self.probed
             )
         }
     }
@@ -285,7 +290,15 @@ mod logic {
     pub enum Out<'a> {
         Segments { secs: u32, dir: &'a str },
         File(&'a str),
+        /// prueba de 3 s (para elegir la forma de grabar que anda en esta PC)
+        Test(&'a str),
     }
+
+    /// Número de compilación: la prueba de cómo grabar se repite con cada versión nueva.
+    pub const BUILD: &str = match option_env!("GITHUB_RUN_NUMBER") {
+        Some(v) => v,
+        None => "dev",
+    };
 
     /// Qué se graba: la pantalla principal o una sola ventana (por su HWND).
     /// La ventana se graba con Windows Graphics Capture: sale solo esa ventana,
@@ -369,6 +382,7 @@ mod logic {
             // y cada cuadro se escribe en el momento: al frenar no se pierde lo que quedaba en memoria
             // (con imagen quieta un video ocupa tan poco que antes no llegaba a escribirse nada)
             Out::File(path) => a.extend(s(&["-flush_packets", "1", "-y", "-f", "mpegts", path])),
+            Out::Test(path) => a.extend(s(&["-t", "3", "-y", "-f", "mpegts", path])),
         }
         a
     }
@@ -594,6 +608,11 @@ mod logic {
             assert!(!c.gpu_only && c.encoder == 0);
             let c = Config::parse(&Config { encoder: 9, gpu_only: true, ..Config::defaults("F".into()) }.serialize(), "F".into());
             assert!(c.gpu_only && c.encoder == 9);
+            let c = Config::parse(&Config { probed: "41".into(), ..Config::defaults("F".into()) }.serialize(), "F".into());
+            assert_eq!(c.probed, "41");
+            assert!(Config::parse("version=2\nprobed=41\n", "F".into()).probed.is_empty());
+            let t = record_args(12, 0, 30, Source::Screen, None, Out::Test("p.ts")).join(" ");
+            assert!(t.ends_with("-t 3 -y -f mpegts p.ts") && t.contains("gdigrab"));
             assert!(d.bg == BG_GAMES && d.mic && d.sound && d.rec.vk == VK_F8);
             let c = Config::parse("version=2\nbg=0\nmic=0\nsound=0\n", "F".into());
             assert!(c.bg == BG_OFF && !c.mic && !c.sound);
@@ -1084,6 +1103,8 @@ mod app {
     const WM_TRAY: u32 = WM_APP + 1;
     const WM_DONE: u32 = WM_APP + 2;
     const WM_BIND: u32 = WM_APP + 3;
+    /// terminó la prueba de cómo grabar (wParam = encoder que anduvo, o usize::MAX)
+    const WM_PROBED: u32 = WM_APP + 4;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     // El juego siempre gana la CPU: grabar en "debajo de lo normal", guardar/capturar en "baja".
     const BELOW_NORMAL: u32 = 0x0000_4000;
@@ -1151,6 +1172,8 @@ mod app {
         share_token: Option<i64>,
         /// intervalo actual del watchdog: 2 s grabando, 10 s en reposo
         tick_ms: u32,
+        /// probando en segundo plano qué forma de grabar anda en esta PC
+        probing: bool,
         rec: Rec,
         binding: u8,
         hook: Option<HHOOK>,
@@ -1410,6 +1433,9 @@ mod app {
             if let Some(m) = &self.manual {
                 let a = if m.audio { "" } else { ", sin audio" };
                 return format!("● Grabando {} – {}{a}", m.what, logic::fmt_elapsed(m.t0.elapsed().as_secs()));
+            }
+            if self.probing && self.rec.child.is_none() {
+                return "Buscando la mejor forma de grabar en esta PC…".to_string();
             }
             if self.cfg.bg == BG_OFF {
                 return "Clips en segundo plano: apagado".to_string();
@@ -1682,6 +1708,79 @@ mod app {
             }
         }
 
+        /// La primera vez (y con cada versión nueva) prueba en segundo plano, de a una y con prioridad baja,
+        /// cada forma de grabar: 3 s a un archivo temporal. Se queda con la primera que escribe video de verdad.
+        /// Así F8/F9 andan al toque con lo mejor que tenga esta PC, sea cual sea la placa o el driver.
+        fn start_probe(&mut self) {
+            if self.probing || self.cfg.probed == logic::BUILD {
+                return;
+            }
+            self.probing = true;
+            log_line(&self.log_path, "prueba de grabación: buscando la forma que anda en esta PC");
+            let (ffmpeg, log) = (self.ffmpeg.clone(), self.log_path.clone());
+            let (height, fps, gpu_only) = (self.cfg.height, self.cfg.fps, self.cfg.gpu_only);
+            let test = std::env::temp_dir().join("jugadon_prueba.ts");
+            std::thread::spawn(move || {
+                let mut found = usize::MAX;
+                for e in (0..ENCODERS.len()).filter(|&e| logic::allowed(e, gpu_only)) {
+                    let _ = fs::remove_file(&test);
+                    let path = test.to_string_lossy().into_owned();
+                    let args = logic::record_args(e, height, fps, Source::Screen, None, logic::Out::Test(&path));
+                    let mut cmd = Command::new(&ffmpeg);
+                    cmd.args(&args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(log_stdio(&log));
+                    let Ok(mut child) = spawn_hidden(&mut cmd, IDLE) else { break };
+                    let t0 = Instant::now();
+                    // 3 s de video + arranque; si se cuelga (driver que no responde) se corta a los 15 s
+                    let status = loop {
+                        match child.try_wait() {
+                            Ok(Some(st)) => break Some(st),
+                            Ok(None) if t0.elapsed() < Duration::from_secs(15) => std::thread::sleep(Duration::from_millis(250)),
+                            _ => {
+                                let _ = child.kill();
+                                let _ = child.wait();
+                                break None;
+                            }
+                        }
+                    };
+                    let size = fs::metadata(&test).map(|m| m.len()).unwrap_or(0);
+                    let ok = status.is_some_and(|s| s.success()) && size > 0;
+                    log_line(&log, &format!("prueba de grabación: {} {} ({} KB)", ENCODERS[e].label, if ok { "anda" } else { "no anda" }, size / 1024));
+                    if ok {
+                        found = e;
+                        break;
+                    }
+                }
+                let _ = fs::remove_file(&test);
+                unsafe {
+                    let _ = PostMessageW(Some(HWND(MAIN_HWND.load(Ordering::Relaxed) as _)), WM_PROBED, WPARAM(found), LPARAM(0));
+                }
+            });
+        }
+
+        fn probe_done(&mut self, enc: usize) {
+            self.probing = false;
+            if enc >= ENCODERS.len() {
+                log_line(&self.log_path, "prueba de grabación: ninguna forma anduvo");
+                let hint = ffmpeg_hint(&self.log_path);
+                let gpu = if self.cfg.gpu_only { " Probá desmarcar Opciones → Nunca usar el procesador." } else { "" };
+                self.notify(&format!("No encontré cómo grabar video en esta PC.{hint}{gpu}"), true);
+                return;
+            }
+            self.cfg.encoder = enc;
+            self.cfg.probed = logic::BUILD.to_string();
+            self.save_cfg();
+            let (h, f) = logic::effective(enc, self.cfg.height, self.cfg.fps);
+            log_line(&self.log_path, &format!("prueba de grabación: se usa {} ({h}p {f} fps)", ENCODERS[enc].label));
+            // el buffer de clips arranca (o se pasa) directo a lo que anduvo
+            if !self.rec.good || self.rec.gave_up || self.rec.child.is_none() {
+                self.rec.enc = enc;
+                if self.want_rec() {
+                    self.restart_rec();
+                }
+            }
+            self.update_tip();
+        }
+
         fn restart_rec(&mut self) {
             self.stop_rec();
             self.rec.tried = 0;
@@ -1839,7 +1938,8 @@ mod app {
                 }
                 self.update_tip();
             }
-            if self.rec.child.is_none() && !self.rec.gave_up && self.rec.next_try.is_none_or(|t| now >= t) {
+            // mientras se prueba cómo grabar no se arranca el buffer (no hacer el trabajo dos veces)
+            if self.rec.child.is_none() && !self.rec.gave_up && !self.probing && self.rec.next_try.is_none_or(|t| now >= t) {
                 self.spawn_rec();
             }
         }
@@ -2086,6 +2186,7 @@ mod app {
                 add(o, 32, "Tecla de grabar/frenar…", false);
                 sep(o);
                 add(o, 41, "Iniciar con Windows", autostart_enabled());
+                add(o, 49, "Volver a probar cómo grabar (después de cambiar el driver)", false);
                 add(o, 42, "Ver registro (si algo no anda)", false);
                 let t = wide("Opciones");
                 let _ = AppendMenuW(m, MF_POPUP, o.0 as usize, PCWSTR(t.as_ptr()));
@@ -2170,6 +2271,14 @@ mod app {
                     }
                 }
                 41 => set_autostart(!autostart_enabled()),
+                49 => {
+                    self.cfg.probed.clear();
+                    self.save_cfg();
+                    self.stop_rec();
+                    self.rec.good = false;
+                    self.notify("Probando cómo grabar en esta PC (unos segundos)…", false);
+                    self.start_probe();
+                }
                 42 => {
                     if !self.log_path.exists() {
                         log_line(&self.log_path, "registro abierto desde el menú");
@@ -3773,6 +3882,10 @@ mod app {
                 }
                 LRESULT(0)
             }
+            WM_PROBED => {
+                with_app(|a| a.probe_done(wp.0));
+                LRESULT(0)
+            }
             WM_DONE => {
                 let (text, file) = *Box::from_raw(lp.0 as *mut (String, Option<String>));
                 with_app(|a| {
@@ -3944,6 +4057,7 @@ mod app {
                 gallery: None,
                 share_token: None,
                 tick_ms: 2000,
+                probing: false,
                 rec: Rec {
                     child: None,
                     enc,
@@ -3967,6 +4081,7 @@ mod app {
                 a.add_icon();
                 a.register_keys();
                 a.recover_recordings();
+                a.start_probe();
                 a.tick(); // arranca a grabar ya si no está en "solo juegos" o si ya hay un juego abierto
                 // "jugadon.exe --clips" abre directo la ventana (sirve para un acceso directo)
                 if std::env::args().any(|x| x == "--clips") {

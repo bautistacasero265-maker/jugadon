@@ -120,6 +120,9 @@ try {
   Step "1. Arranque y clips en segundo plano"
   Start-App
   Check ($script:main -ne [IntPtr]::Zero) "se abrió (ícono en la bandeja)"
+  Check (Wait-Until { Log-Has 'prueba de grabación: se usa' } 120) "al abrir prueba sola cómo grabar y elige una forma que anda"
+  Get-Content $log -ErrorAction SilentlyContinue | Select-String 'prueba de grabación' | ForEach-Object { Write-Host "         log: $($_.Line)" }
+  Check ((Cfg 'probed') -ne '') "la prueba queda guardada (no se repite en cada inicio)"
   $bufOk = Buffer-Running 0 90
   Check $bufOk "empezó a grabar el buffer de clips"
   Get-Content $log -ErrorAction SilentlyContinue | Select-String 'iniciando|grabando con|terminó|audio' | Select-Object -Last 30 | ForEach-Object { Write-Host "         log: $($_.Line)" }
@@ -272,6 +275,14 @@ try {
   Cmd 48
   Check (Buffer-Running $b 90) "al desactivarla vuelve a grabar"
   Alive "solo placa"
+
+  Step "6b. Volver a probar cómo grabar (menú)"
+  $b = Log-Count 'prueba de grabación: se usa'
+  Cmd 49
+  Check (Wait-Until { (Log-Count 'prueba de grabación: se usa') -gt $b } 120) "menú → Volver a probar cómo grabar"
+  $b = Log-Count 'grabando con'
+  Check (Buffer-Running ($b - 1) 60) "después vuelve a grabar clips"
+  Alive "volver a probar"
 
   Step "7. Corte de golpe en medio de una grabación (como un corte de luz)"
   Cmd 4

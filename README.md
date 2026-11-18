@@ -99,7 +99,7 @@ Lo que define si se nota es **quién comprime el video**. Jugadón prueba solo, 
 | Cualquiera de las anteriores con un driver viejo | La misma placa, a través de Windows (Media Foundation) | Igual de liviano |
 | Ninguna placa que comprima video | El procesador (salvo que actives "Nunca usar el procesador") | 480p 30 fps, un solo hilo, prioridad baja. En 2 núcleos se puede notar algo |
 
-Si pasás el mouse por el ícono, te dice cuál está usando. Con drivers sin la captura moderna de Windows (por ejemplo Intel HD 2000/3000 en Windows 10), captura por GDI, que funciona en cualquier PC; igual intenta que comprima la placa. Lo que anduvo se recuerda para la próxima vez.
+**La primera vez que abrís Jugadón** (y con cada versión nueva) prueba solo, en segundo plano y con prioridad baja, cada forma de grabar durante 3 segundos, y se queda con la primera que de verdad graba video en tu PC. Por eso F8 y F9 andan sea cual sea tu placa o tu driver. Si cambiás de placa o actualizás el driver: menú → Opciones → **Volver a probar cómo grabar**. Si pasás el mouse por el ícono, te dice cuál está usando. Con drivers sin la captura moderna de Windows (por ejemplo Intel HD 2000/3000 en Windows 10), captura por GDI, que funciona en cualquier PC; igual intenta que comprima la placa. Lo que anduvo se recuerda para la próxima vez.
 
 ## Problemas comunes
 
