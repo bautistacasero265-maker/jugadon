@@ -5,7 +5,8 @@
 Clips de juegos para Windows 10/11, pensado para PCs de pocos recursos. Vive en la bandeja del sistema. Mientras jugás, guarda siempre los últimos segundos; cuando apretás **F9**, se guardan como `.mp4` con un sonidito de confirmación. **F10** saca una captura en `.png`. No tiene ventanas, galería ni cuenta: es lo mínimo para que el juego no lo sienta.
 
 - 🎮 **Clips en segundo plano, como vos quieras.** Pueden estar activos solo mientras jugás (viene así), siempre o apagados.
-- ⏺️ **Grabación normal**: **F8** empieza a grabar la pantalla completa y **F8** la frena y la guarda. También podés grabar una sola ventana: el juego, el navegador o cualquier otra.
+- ⏺️ **Grabación normal**: **F8** empieza a grabar la pantalla completa y **F8** la frena y la guarda.
+- 🪟 **Grabar una sola ventana** (el juego, el navegador, Discord, la que sea). Sale solo esa ventana, aunque tengas otra cosa adelante.
 - ⚡ **Hecho en Rust, todo el video en la placa.** El procesador queda para el juego.
 - 🔊 **Sonido del juego y, si querés, tu micrófono.**
 - 📋 **Copiar último clip**: lo pegás con Ctrl+V en Discord o WhatsApp.
@@ -37,10 +38,12 @@ Los clips y capturas van a `Videos\Jugadon`. Al guardar suena un "tin-tin" y apa
    - **Apagado**: no graba nada por su cuenta. Solo grabás cuando apretás F8.
 2. **Grabación de principio a fin.**
    - **F8** (o menú → **Grabar pantalla completa**) empieza.
-   - Para una ventana: menú → **Grabar una ventana** y elegís cuál de la lista.
+   - Para una ventana: menú → **Grabar una ventana** y elegís cuál de la lista (aparecen con el nombre que muestran en la barra de título). Se graba **solo esa ventana**, aunque la tapes con otra o estés usando otra cosa adelante. Si cerrás la ventana, la grabación se frena y se guarda sola.
    - **F8** de nuevo (o menú → **Frenar y guardar**) la frena y la guarda como `grabacion_….mp4`.
    - Mientras graba, el ícono se pone **rojo** y al pasar el mouse muestra el tiempo.
    - Si se corta la luz o se cuelga la PC, lo grabado se recupera solo la próxima vez que abrís Jugadón.
+
+**Los clips no se sacan solos.** Jugadón nunca decide qué es una buena jugada: el clip se guarda solo cuando vos apretás F9. "Solo mientras juego" decide únicamente *cuándo* está activa la memoria de los últimos segundos.
 
 **¿Cómo sabe que estás jugando?** Cada 2 segundos mira cuál es la ventana activa. Le alcanza con eso; no lee la memoria del juego ni se mete en él (por eso ningún anticheat lo marca). - Si la ventana activa tapa toda la pantalla principal (pantalla completa o "ventana sin bordes"), cuenta como juego y empiezan los clips.
 - Una ventana maximizada común (con la barra de tareas a la vista) no cuenta.
@@ -87,7 +90,10 @@ Mirá los números reales en el Administrador de tareas: "Jugadón" y "ffmpeg.ex
 ## Límites conocidos
 
 - Solo graba el **monitor principal**.
-- **Grabar una ventana** graba el rectángulo de la pantalla donde está esa ventana. Si la movés o le ponés otra encima, se graba lo que quede en ese lugar. Para juegos conviene pantalla completa o "ventana sin bordes".
+- **Grabar una ventana**:
+  - Usa la captura de ventanas de Windows (Windows Graphics Capture), que necesita **Windows 10 versión 2004 o más nuevo**.
+  - Si **minimizás** la ventana, Windows deja de mandar imagen y el video queda congelado hasta que la volvés a mostrar.
+  - Algunos juegos en pantalla completa *exclusiva* no se pueden grabar como ventana. Para esos usá F8 (pantalla completa) o ponelos en "ventana sin bordes".
 - Audio: el **sonido del sistema** y, si lo activás, el **micrófono**, mezclados en una sola pista.
 - Sin HDR. Con HDR activado los colores pueden salir lavados.
 - Algunos juegos en pantalla completa exclusiva no se capturan bien. En ese caso, usá "ventana sin bordes".
@@ -101,7 +107,7 @@ Todo se compila en GitHub Actions (`.github/workflows/release.yml`) cada vez que
 
 - corre los tests (incluida una grabación real con ffmpeg),
 - compila `jugadon.exe` con su ícono,
-- baja una versión fija de FFmpeg y verifica que tenga `ddagrab`, `scale_d3d11`, NVENC, AMF, QSV y x264,
+- baja FFmpeg 8.1 y verifica que tenga `ddagrab`, `gfxcapture`, `scale_d3d11`, NVENC, AMF, QSV y x264,
 - publica el zip en Releases.
 
 El ícono y el banner se generan con `assets/make_assets.py`.

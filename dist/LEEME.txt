@@ -19,8 +19,11 @@ Clips en segundo plano (F9): por defecto solo mientras hay un juego en
 pantalla completa (o ventana sin bordes). Se cambia en el menú ->
 "Clips en segundo plano": Solo mientras juego / Siempre / Apagado.
 
+Los clips NO se sacan solos: se guardan solo cuando vos apretás F9.
+
 Para grabar una sola ventana (el juego, el navegador, lo que sea):
-menú -> "Grabar una ventana" y la elegís. F8 la frena y la guarda.
+menú -> "Grabar una ventana" y la elegís. Sale solo esa ventana, aunque
+tengas otra cosa adelante. F8 la frena y la guarda.
 
 Los archivos van a: %USERPROFILE%\Videos\Jugadon
 Al guardar suena un "tin-tin" y aparece un aviso: tocalo para ver el clip.

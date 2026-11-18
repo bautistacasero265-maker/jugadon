@@ -159,8 +159,8 @@ mod logic {
     const AMF: &[&str] = &["-usage", "lowlatency", "-quality", "speed", "-rc", "cbr"];
     const QSV: &[&str] = &["-preset", "veryfast"];
     // a 720p como máximo (una ventana chica no se agranda)
-    const GPU: &str = "scale_d3d11=width=-2:height=min(720\\,ih):format=nv12";
-    const CPU: &str = "hwdownload,format=bgra,scale=-2:min(720\\,ih):flags=fast_bilinear,format=nv12";
+    const GPU: &str = "scale_d3d11=width=-2:height=min(720\\,trunc(ih/2)*2):format=nv12";
+    const CPU: &str = "hwdownload,format=bgra,scale=-2:min(720\\,trunc(ih/2)*2):flags=fast_bilinear,format=nv12";
 
     /// Orden de prueba: todo en GPU primero, después escalado en CPU, último x264.
     pub const ENCODERS: [Enc; 7] = [
@@ -168,7 +168,7 @@ mod logic {
         Enc { label: "AMF", vf: GPU, codec: "h264_amf", opts: AMF },
         Enc {
             label: "QSV",
-            vf: "scale_d3d11=width=-2:height=min(720\\,ih):format=nv12,hwmap=derive_device=qsv,format=qsv",
+            vf: "scale_d3d11=width=-2:height=min(720\\,trunc(ih/2)*2):format=nv12,hwmap=derive_device=qsv,format=qsv",
             codec: "h264_qsv",
             opts: QSV,
         },
@@ -201,21 +201,17 @@ mod logic {
         File(&'a str),
     }
 
-    /// Zona de la pantalla principal a grabar: (x, y, ancho, alto). None = pantalla completa.
-    pub type Region = Option<(i32, i32, i32, i32)>;
-
-    /// Ajusta una ventana (izq, arriba, der, abajo) a la pantalla (ancho, alto), con medidas pares.
-    pub fn window_region(win: (i32, i32, i32, i32), screen: (i32, i32)) -> Option<(i32, i32, i32, i32)> {
-        let l = win.0.clamp(0, screen.0);
-        let t = win.1.clamp(0, screen.1);
-        let r = win.2.clamp(0, screen.0);
-        let b = win.3.clamp(0, screen.1);
-        let (w, h) = ((r - l) & !1, (b - t) & !1);
-        (w >= 64 && h >= 64).then_some((l, t, w, h))
+    /// Qué se graba: la pantalla principal o una sola ventana (por su HWND).
+    /// La ventana se graba con Windows Graphics Capture: sale solo esa ventana,
+    /// aunque esté tapada o en segundo plano.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub enum Source {
+        Screen,
+        Window(u64),
     }
 
     /// Argumentos de grabación. audio = (Hz, canales) de PCM f32 por stdin.
-    pub fn record_args(enc: usize, fps: u32, region: Region, audio: Option<(u32, u16)>, out: Out) -> Vec<String> {
+    pub fn record_args(enc: usize, fps: u32, src: Source, audio: Option<(u32, u16)>, out: Out) -> Vec<String> {
         let e = &ENCODERS[enc];
         let br = bitrate_mbit(fps);
         // un solo hilo de filtros: todo el trabajo pesado está en la GPU
@@ -224,11 +220,10 @@ mod logic {
             a.push("-nostdin".into());
         }
         a.extend(s(&["-f", "lavfi", "-i"]));
-        let mut src = format!("ddagrab=framerate={fps}:draw_mouse=1");
-        if let Some((x, y, w, h)) = region {
-            src.push_str(&format!(":video_size={w}x{h}:offset_x={x}:offset_y={y}"));
-        }
-        a.push(src);
+        a.push(match src {
+            Source::Screen => format!("ddagrab=framerate={fps}:draw_mouse=1"),
+            Source::Window(h) => format!("gfxcapture=hwnd={h}:max_framerate={fps}:capture_cursor=1"),
+        });
         if let Some((rate, ch)) = audio {
             // sin probesize/analyzeduration ffmpeg lee ~5 s de audio antes de arrancar el video (desfase)
             a.extend(s(&["-thread_queue_size", "1024", "-probesize", "32", "-analyzeduration", "0", "-f", "f32le", "-ar"]));
@@ -239,7 +234,12 @@ mod logic {
         } else {
             a.extend(s(&["-map", "0:v"]));
         }
-        a.extend(s(&["-vf", e.vf, "-c:v", e.codec]));
+        a.extend(s(&["-vf", e.vf]));
+        if matches!(src, Source::Window(_)) {
+            // la captura de ventana manda cuadros solo cuando la ventana cambia: video a fps fijos
+            a.extend(["-fps_mode".into(), "cfr".into(), "-r".into(), fps.to_string()]);
+        }
+        a.extend(s(&["-c:v", e.codec]));
         a.extend(s(e.opts));
         a.extend([
             "-b:v".into(),
@@ -501,11 +501,11 @@ mod logic {
 
         #[test]
         fn record_args_gpu_with_audio() {
-            let a = record_args(0, 60, None, Some((48000, 2)), Out::Segments { secs: 30, dir: "C:\\T\\jugadon_buf" }).join(" ");
+            let a = record_args(0, 60, Source::Screen, Some((48000, 2)), Out::Segments { secs: 30, dir: "C:\\T\\jugadon_buf" }).join(" ");
             assert!(a.contains("-f lavfi -i ddagrab=framerate=60:draw_mouse=1"));
             assert!(a.starts_with("-hide_banner -loglevel warning -nostats -filter_threads 1 -f lavfi"));
             assert!(a.contains("-thread_queue_size 1024 -probesize 32 -analyzeduration 0 -f f32le -ar 48000 -ac 2 -i pipe:0 -map 0:v -map 1:a"));
-            assert!(a.contains("-vf scale_d3d11=width=-2:height=min(720\\,ih):format=nv12 -c:v h264_nvenc -preset p1 -tune ll -rc cbr"));
+            assert!(a.contains("-vf scale_d3d11=width=-2:height=min(720\\,trunc(ih/2)*2):format=nv12 -c:v h264_nvenc -preset p1 -tune ll -rc cbr"));
             assert!(a.contains("-b:v 9M -maxrate 9M -bufsize 18M -g 120 -bf 0"));
             assert!(a.contains("-c:a aac -b:a 160k"));
             assert!(a.ends_with("-f segment -segment_time 2 -segment_wrap 20 -segment_format mpegts C:\\T\\jugadon_buf\\seg%03d.ts"));
@@ -515,40 +515,32 @@ mod logic {
 
         #[test]
         fn record_args_cpu_no_audio() {
-            let a = record_args(6, 30, None, None, Out::Segments { secs: 60, dir: "D" }).join(" ");
+            let a = record_args(6, 30, Source::Screen, None, Out::Segments { secs: 60, dir: "D" }).join(" ");
             assert!(a.contains("-nostdin"));
-            assert!(a.contains("-map 0:v -vf hwdownload,format=bgra,scale=-2:min(720\\,ih)"));
+            assert!(a.contains("-map 0:v -vf hwdownload,format=bgra,scale=-2:min(720\\,trunc(ih/2)*2)"));
             assert!(a.contains("-c:v libx264 -preset ultrafast"));
             assert!(a.contains("-b:v 6M"));
             assert!(a.contains("-g 60"));
             assert!(!a.contains("pipe:0"));
             assert!(!a.contains("-c:a"));
             for i in 0..ENCODERS.len() {
-                assert!(record_args(i, 30, None, None, Out::File("x.ts")).iter().any(|x| x == ENCODERS[i].codec));
+                assert!(record_args(i, 30, Source::Screen, None, Out::File("x.ts")).iter().any(|x| x == ENCODERS[i].codec));
             }
         }
 
         #[test]
         fn manual_recording_args() {
-            let a = record_args(0, 30, Some((100, 50, 1280, 720)), None, Out::File("C:\\T\\rec.ts")).join(" ");
-            assert!(a.contains("-i ddagrab=framerate=30:draw_mouse=1:video_size=1280x720:offset_x=100:offset_y=50 "));
+            let a = record_args(0, 30, Source::Window(1234), None, Out::File("C:\\T\\rec.ts")).join(" ");
+            assert!(a.contains("-i gfxcapture=hwnd=1234:max_framerate=30:capture_cursor=1 "));
+            assert!(a.contains("format=nv12 -fps_mode cfr -r 30 -c:v h264_nvenc"));
+            assert!(!a.contains("ddagrab"));
+            assert!(!record_args(0, 30, Source::Screen, None, Out::File("x")).join(" ").contains("-fps_mode"));
             assert!(a.ends_with("-y -f mpegts C:\\T\\rec.ts"));
             assert!(!a.contains("segment"));
             let r = remux_args("a.ts", "b.mp4").join(" ");
             assert!(r.contains("-i a.ts -map 0 -c copy -movflags +faststart b.mp4"));
             assert_eq!(fmt_elapsed(187), "3:07");
             assert_eq!(fmt_elapsed(3909), "1:05:09");
-        }
-
-        #[test]
-        fn window_regions() {
-            // ventana normal: medidas pares
-            assert_eq!(window_region((101, 51, 900, 650), (1920, 1080)), Some((101, 51, 798, 598)));
-            // se sale de la pantalla: se recorta
-            assert_eq!(window_region((-50, -20, 2000, 1100), (1920, 1080)), Some((0, 0, 1920, 1080)));
-            // fuera de la pantalla o muy chica
-            assert_eq!(window_region((3000, 0, 3500, 500), (1920, 1080)), None);
-            assert_eq!(window_region((0, 0, 40, 40), (1920, 1080)), None);
         }
 
         #[test]
@@ -591,7 +583,7 @@ mod win_tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let dirs = dir.to_string_lossy().into_owned();
-        let mut args = logic::record_args(6, 30, None, Some((48000, 2)), logic::Out::Segments { secs: 6, dir: &dirs });
+        let mut args = logic::record_args(6, 30, logic::Source::Screen, Some((48000, 2)), logic::Out::Segments { secs: 6, dir: &dirs });
         for a in args.iter_mut() {
             if a.starts_with("ddagrab=") {
                 *a = "testsrc2=size=1920x1080:rate=30,realtime".into();
@@ -672,10 +664,10 @@ mod win_tests_manual {
         let tmp = std::env::temp_dir();
         let ts = tmp.join("jugadon_test_rec.ts").to_string_lossy().into_owned();
         let mp4 = tmp.join("jugadon_test_rec.mp4").to_string_lossy().into_owned();
-        let mut args = logic::record_args(6, 30, Some((0, 0, 800, 600)), None, logic::Out::File(&ts));
+        let mut args = logic::record_args(6, 30, logic::Source::Window(0), None, logic::Out::File(&ts));
         for a in args.iter_mut() {
-            if a.starts_with("ddagrab=") {
-                *a = "testsrc2=size=800x600:rate=30,realtime".into();
+            if a.starts_with("gfxcapture=") {
+                *a = "testsrc2=size=800x601:rate=30,realtime".into(); // alto impar a propósito
             } else if a.starts_with("hwdownload,format=bgra,") {
                 *a = a.replacen("hwdownload,format=bgra,", "", 1);
             }
@@ -693,7 +685,7 @@ mod win_tests_manual {
             .unwrap();
         let info = String::from_utf8_lossy(&o.stdout).to_string();
         eprintln!("{info}");
-        // 600 px de alto: una ventana chica no se agranda a 720
+        // 601 px de alto -> 600: una ventana chica no se agranda a 720 y queda par
         assert!(info.contains("codec_name=h264") && info.contains("height=600"), "{info}");
         let dur: f64 = info.lines().find_map(|l| l.strip_prefix("duration=")).and_then(|v| v.parse().ok()).unwrap_or(0.0);
         assert!((1.5..=5.0).contains(&dur), "duración rara: {dur}");
@@ -712,7 +704,7 @@ fn main() {
 
 #[cfg(windows)]
 mod app {
-    use crate::logic::{self, Config, Hotkey, Region, BG_ALWAYS, BG_GAMES, BG_OFF, DURATIONS, ENCODERS};
+    use crate::logic::{self, Config, Hotkey, Source, BG_ALWAYS, BG_GAMES, BG_OFF, DURATIONS, ENCODERS};
     use std::cell::RefCell;
     use std::fs::{self, File, OpenOptions};
     use std::io::Write;
@@ -777,7 +769,7 @@ mod app {
         started: Instant,
         t0: Instant,
         ts: PathBuf,
-        region: Region,
+        src: Source,
         what: String,
         audio: bool,
     }
@@ -956,18 +948,6 @@ mod app {
         v
     }
 
-    /// Rectángulo visible de la ventana (sin la sombra), en píxeles reales.
-    fn window_rect(hwnd: HWND) -> Option<(i32, i32, i32, i32)> {
-        use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS};
-        unsafe {
-            let mut r = RECT::default();
-            if DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &mut r as *mut RECT as _, std::mem::size_of::<RECT>() as u32).is_err() {
-                GetWindowRect(hwnd, &mut r).ok()?;
-            }
-            Some((r.left, r.top, r.right, r.bottom))
-        }
-    }
-
     /// Pasa la grabación .ts a .mp4 (prioridad baja) y avisa. Si falla, deja el .ts.
     fn remux_in_background(ffmpeg: PathBuf, log: PathBuf, ts: PathBuf, out: PathBuf, msg: String) {
         std::thread::spawn(move || {
@@ -1144,16 +1124,16 @@ mod app {
         }
 
         /// Lanza ffmpeg grabando (audio por pipe si se puede). Devuelve (proceso, ¿con audio?).
-        fn launch(&self, enc: usize, region: Region, out: logic::Out) -> (Option<Child>, bool) {
+        fn launch(&self, enc: usize, src: Source, out: logic::Out) -> (Option<Child>, bool) {
             // audio: captura WASAPI + pipe chico hacia el stdin de ffmpeg; si algo falla, solo video
             let audio = match crate::audio::start(self.cfg.mic) {
                 Some(a) => crate::audio::small_pipe().map(|p| (a, p)),
                 None => None,
             };
             let fmt = audio.as_ref().map(|(a, _)| (a.rate, a.channels));
-            let args = logic::record_args(enc, self.cfg.fps, region, fmt, out);
+            let args = logic::record_args(enc, self.cfg.fps, src, fmt, out);
             let audio_desc = fmt.map_or("no".to_string(), |f| format!("{} Hz, {} canales", f.0, f.1));
-            log_line(&self.log_path, &format!("iniciando {} {} fps (audio: {audio_desc}, zona: {region:?})", ENCODERS[enc].label, self.cfg.fps));
+            log_line(&self.log_path, &format!("iniciando {} {} fps (audio: {audio_desc}, fuente: {src:?})", ENCODERS[enc].label, self.cfg.fps));
             let mut cmd = Command::new(&self.ffmpeg);
             cmd.args(&args).stdout(Stdio::null()).stderr(log_stdio(&self.log_path));
             let feed = match audio {
@@ -1186,7 +1166,7 @@ mod app {
         fn spawn_rec(&mut self) {
             self.clear_buf();
             let dir = self.buf_dir.to_string_lossy().into_owned();
-            let (child, audio) = self.launch(self.rec.enc, None, logic::Out::Segments { secs: self.cfg.secs, dir: &dir });
+            let (child, audio) = self.launch(self.rec.enc, Source::Screen, logic::Out::Segments { secs: self.cfg.secs, dir: &dir });
             self.rec.started = Instant::now();
             self.rec.next_try = None;
             self.rec.child = child;
@@ -1198,8 +1178,8 @@ mod app {
 
         fn spawn_manual(&mut self) {
             let Some(m) = self.manual.as_ref() else { return };
-            let (enc, region, ts) = (m.enc, m.region, m.ts.to_string_lossy().into_owned());
-            let (child, audio) = self.launch(enc, region, logic::Out::File(&ts));
+            let (enc, src, ts) = (m.enc, m.src, m.ts.to_string_lossy().into_owned());
+            let (child, audio) = self.launch(enc, src, logic::Out::File(&ts));
             if let Some(m) = self.manual.as_mut() {
                 m.child = child;
                 m.audio = audio;
@@ -1207,7 +1187,7 @@ mod app {
             }
         }
 
-        fn start_manual(&mut self, region: Region, what: String) {
+        fn start_manual(&mut self, src: Source, what: String) {
             if self.manual.is_some() {
                 return;
             }
@@ -1217,7 +1197,7 @@ mod app {
             let _ = fs::create_dir_all(&self.rec_dir);
             let ts = self.rec_dir.join(format!("grabacion_{}.ts", now_stamp()));
             let now = Instant::now();
-            self.manual = Some(Manual { child: None, enc: self.cfg.encoder, tried: 0, started: now, t0: now, ts, region, what, audio: false });
+            self.manual = Some(Manual { child: None, enc: self.cfg.encoder, tried: 0, started: now, t0: now, ts, src, what, audio: false });
             self.spawn_manual();
             self.play_sound();
             let what = self.manual.as_ref().map(|m| m.what.clone()).unwrap_or_default();
@@ -1259,23 +1239,23 @@ mod app {
             if self.manual.is_some() {
                 self.finish_manual(false);
             } else {
-                self.start_manual(None, "la pantalla".to_string());
+                self.start_manual(Source::Screen, "la pantalla".to_string());
             }
         }
 
         fn record_window(&mut self, idx: usize) {
             let Some((hwnd, title)) = self.menu_windows.get(idx).cloned() else { return };
             unsafe {
-                if IsIconic(hwnd).as_bool() {
-                    let _ = ShowWindow(hwnd, SW_RESTORE);
+                if !IsWindow(Some(hwnd)).as_bool() {
+                    self.notify("Esa ventana ya se cerró.", true);
+                    return;
                 }
-                let _ = SetForegroundWindow(hwnd);
+                // minimizada no manda imagen: la restauramos (sin traerla adelante)
+                if IsIconic(hwnd).as_bool() {
+                    let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                }
             }
-            let screen = unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) };
-            match window_rect(hwnd).and_then(|r| logic::window_region(r, screen)) {
-                Some(region) => self.start_manual(Some(region), format!("\"{title}\"")),
-                None => self.notify("Esa ventana no está en la pantalla principal (o es muy chica). Movela y probá de nuevo.", true),
-            }
+            self.start_manual(Source::Window(hwnd.0 as usize as u64), format!("\"{title}\""));
         }
 
         /// Grabaciones que quedaron a medias (se cortó la luz, se colgó la PC…): se pasan a mp4.
