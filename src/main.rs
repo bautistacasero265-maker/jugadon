@@ -459,18 +459,57 @@ mod logic {
         s(&["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-ss", &a, "-i", input, "-t", &d, "-map", "0", "-c", "copy", "-avoid_negative_ts", "make_zero", "-movflags", "+faststart", out])
     }
 
-    /// Subir un clip para compartirlo por link (curl.exe viene con Windows 10/11).
-    /// Temporal: litterbox (se borra solo a las 72 h, hasta 1 GB). Permanente: catbox (hasta 200 MB).
-    pub fn upload_args(path: &str, permanent: bool) -> Vec<String> {
+    /// Servicios para compartir por link, en orden: si uno falla (caído, bloqueado, archivo muy grande),
+    /// se prueba el siguiente. Devuelve (nombre, argumentos de curl.exe, horas que dura o 0 = no vence).
+    /// curl.exe viene con Windows 10 (1803+) y 11.
+    pub fn upload_plan(path: &str, permanent: bool, size: u64) -> Vec<(&'static str, Vec<String>, u32)> {
         // curl interpreta "\" adentro de las comillas: la ruta va con barras normales (Windows las acepta)
-        let file = format!("fileToUpload=@\"{}\"", path.replace('\\', "/"));
-        let mut a = s(&["-sS", "-f", "--retry", "2", "--max-time", "1800", "-F", "reqtype=fileupload"]);
-        if !permanent {
-            a.extend(s(&["-F", "time=72h"]));
+        let p = path.replace('\\', "/");
+        let base = || s(&["-sS", "-f", "--retry", "1", "--connect-timeout", "15", "--max-time", "1800", "-A", "Jugadon/1.0"]);
+        let with = |extra: &[String], url: &str| {
+            let mut a = base();
+            for e in extra {
+                a.push("-F".into());
+                a.push(e.clone());
+            }
+            a.push(url.into());
+            a
+        };
+        let mb = size >> 20;
+        let mut plan = Vec::new();
+        if permanent {
+            if mb < 200 {
+                plan.push(("catbox", with(&["reqtype=fileupload".into(), format!("fileToUpload=@\"{p}\"")], "https://catbox.moe/user/api.php"), 0));
+            }
+        } else {
+            if mb < 1000 {
+                plan.push(("litterbox", with(&["reqtype=fileupload".into(), "time=72h".into(), format!("fileToUpload=@\"{p}\"")], "https://litterbox.catbox.moe/resources/internals/api.php"), 72));
+            }
+            if mb < 128 {
+                plan.push(("uguu", with(&[format!("files[]=@\"{p}\"")], "https://uguu.se/upload"), 48));
+            }
         }
-        a.extend(["-F".to_string(), file]);
-        a.push(if permanent { "https://catbox.moe/user/api.php" } else { "https://litterbox.catbox.moe/resources/internals/api.php" }.to_string());
-        a
+        // gofile: sin límite práctico; el link dura mientras lo sigan mirando (unos 10 días sin visitas)
+        plan.push(("gofile", with(&[format!("file=@\"{p}\"")], "https://upload.gofile.io/uploadfile"), 240));
+        plan
+    }
+
+    /// Saca el link de la respuesta del servicio (texto plano o JSON).
+    pub fn parse_upload(out: &str) -> Option<String> {
+        let t = out.trim();
+        if t.starts_with("https://") && !t.contains(char::is_whitespace) {
+            return Some(t.to_string());
+        }
+        for key in ["\"downloadPage\":\"", "\"url\":\""] {
+            if let Some(i) = t.find(key) {
+                let rest = &t[i + key.len()..];
+                let url = rest[..rest.find('"')?].replace("\\/", "/");
+                if url.starts_with("https://") {
+                    return Some(url);
+                }
+            }
+        }
+        None
     }
 
     /// Nombre de una copia: "clip_X.mp4" + "sin10s" -> "clip_X_sin10s.mp4" (el título personalizado se mantiene al final).
@@ -942,9 +981,16 @@ mod logic {
             assert!(r.contains("-i a.ts -map 0 -c copy -movflags +faststart b.mp4"));
             assert_eq!(fmt_elapsed(187), "3:07");
             assert!(cut_args("a.mp4", 1.5, 4.0, "b.mp4").join(" ").contains("-ss 1.50 -i a.mp4 -t 2.50 -map 0 -c copy"));
-            let u = upload_args("C:\\V\\clip a.mp4", false).join(" ");
-            assert!(u.contains("-F time=72h -F fileToUpload=@\"C:/V/clip a.mp4\" https://litterbox.catbox.moe/"));
-            assert!(upload_args("x.mp4", true).last().unwrap().starts_with("https://catbox.moe/"));
+            let plan = upload_plan("C:\\V\\clip a.mp4", false, 10 << 20);
+            assert_eq!(plan.iter().map(|x| x.0).collect::<Vec<_>>(), ["litterbox", "uguu", "gofile"]);
+            assert!(plan[0].1.join(" ").contains("-F time=72h -F fileToUpload=@\"C:/V/clip a.mp4\" https://litterbox.catbox.moe/"));
+            assert_eq!(upload_plan("x.mp4", false, 500 << 20).iter().map(|x| x.0).collect::<Vec<_>>(), ["litterbox", "gofile"]);
+            assert_eq!(upload_plan("x.mp4", true, 300 << 20).iter().map(|x| x.0).collect::<Vec<_>>(), ["gofile"]);
+            assert_eq!(upload_plan("x.mp4", true, 10).last().unwrap().2, 240);
+            assert_eq!(parse_upload("https://litter.catbox.moe/abc.mp4\n"), Some("https://litter.catbox.moe/abc.mp4".into()));
+            assert_eq!(parse_upload(r#"{"success":true,"files":[{"url":"https:\/\/h.uguu.se\/x.mp4"}]}"#), Some("https://h.uguu.se/x.mp4".into()));
+            assert_eq!(parse_upload(r#"{"status":"ok","data":{"downloadPage":"https://gofile.io/d/AbC","id":"1"}}"#), Some("https://gofile.io/d/AbC".into()));
+            assert_eq!(parse_upload("<html>error</html>"), None);
             assert!(trim_start_args("a.mp4", 10, "b.mp4").join(" ").contains("-ss 10 -i a.mp4 -map 0 -c copy"));
             assert_eq!(derived_name("clip_X.mp4", "sin10s"), "clip_X_sin10s.mp4");
             assert_eq!(derived_name("clip_X - ace.mp4", "discord"), "clip_X_discord - ace.mp4");
@@ -1936,26 +1982,29 @@ mod app {
                 return;
             }
             let size = fs::metadata(&f).map(|m| m.len()).unwrap_or(0);
-            let limit: u64 = if permanent { 200 << 20 } else { 1 << 30 };
-            if size > limit {
-                self.uploading.remove(&name);
-                self.notify(&format!("Es muy grande para un link ({}; máximo {}). Probá \"Achicar para Discord\" o recortalo.", logic::fmt_size(size), logic::fmt_size(limit)), true);
-                return;
-            }
+            let _ = permanent;
             self.notify(&format!("Subiendo el clip ({}) para compartirlo… Cuando termine, el link queda copiado.", logic::fmt_size(size)), false);
             let log = self.log_path.clone();
             let curl = std::env::var("SystemRoot").map(|r| PathBuf::from(r).join("System32").join("curl.exe")).unwrap_or_else(|_| PathBuf::from("curl.exe"));
             std::thread::spawn(move || {
-                let args = logic::upload_args(&f.to_string_lossy(), permanent);
-                let mut cmd = Command::new(curl);
-                cmd.args(&args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(log_stdio(&log));
-                let out = spawn_hidden(&mut cmd, BELOW_NORMAL).and_then(|c| c.wait_with_output());
-                let text = out.as_ref().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
-                let ok = out.as_ref().is_ok_and(|o| o.status.success()) && text.starts_with("https://");
-                log_line(&log, &format!("compartir link: {}", if ok { text.as_str() } else { "falló" }));
+                // se prueba cada servicio hasta que uno devuelva el link
+                let mut got: Option<(String, u32)> = None;
+                for (svc, args, hours) in logic::upload_plan(&f.to_string_lossy(), permanent, size) {
+                    let mut cmd = Command::new(&curl);
+                    cmd.args(&args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(log_stdio(&log));
+                    let out = spawn_hidden(&mut cmd, BELOW_NORMAL).and_then(|c| c.wait_with_output());
+                    let text = out.as_ref().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
+                    let url = out.as_ref().ok().filter(|o| o.status.success()).and_then(|_| logic::parse_upload(&text));
+                    log_line(&log, &format!("compartir link ({svc}): {}", url.as_deref().unwrap_or("falló")));
+                    if let Some(u) = url {
+                        got = Some((u, hours));
+                        break;
+                    }
+                }
                 let now = std::time::SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
-                let exp = if permanent { 0 } else { now + 72 * 3600 };
-                let msg = Box::new((name, if ok { text } else { String::new() }, exp, permanent));
+                let (url, hours) = got.unwrap_or_default();
+                let exp = if hours == 0 { 0 } else { now + hours as u64 * 3600 };
+                let msg = Box::new((name, url, exp, hours));
                 unsafe {
                     let raw = Box::into_raw(msg);
                     if PostMessageW(Some(HWND(MAIN_HWND.load(Ordering::Relaxed) as _)), WM_LINK, WPARAM(0), LPARAM(raw as isize)).is_err() {
@@ -1965,7 +2014,7 @@ mod app {
             });
         }
 
-        fn link_done(&mut self, name: String, url: String, exp: u64, permanent: bool) {
+        fn link_done(&mut self, name: String, url: String, exp: u64, hours: u32) {
             self.uploading.remove(&name);
             if url.is_empty() {
                 self.notify("No pude subir el clip (¿hay internet?). Probá de nuevo en un rato.", true);
@@ -1977,7 +2026,11 @@ mod app {
             });
             copy_text_to_clipboard(self.hwnd, &url);
             self.play_sound();
-            let when = if permanent { "no vence" } else { "se borra solo en 3 días" };
+            let when = match hours {
+                0 => "no vence".to_string(),
+                h if h <= 72 => format!("se borra solo en {} días", h / 24),
+                _ => "se borra si nadie lo mira por unos días".to_string(),
+            };
             self.notify(&format!("¡Link copiado al portapapeles! Pegalo donde quieras: lo ve cualquiera, tenga o no Jugadón ({when}).\n{url}"), false);
         }
 
@@ -5156,8 +5209,8 @@ mod app {
                 LRESULT(0)
             }
             WM_LINK => {
-                let (name, url, exp, permanent) = *Box::from_raw(lp.0 as *mut (String, String, u64, bool));
-                with_app(|a| a.link_done(name, url, exp, permanent));
+                let (name, url, exp, hours) = *Box::from_raw(lp.0 as *mut (String, String, u64, u32));
+                with_app(|a| a.link_done(name, url, exp, hours));
                 LRESULT(0)
             }
             WM_PROBED => {

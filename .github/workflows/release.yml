@@ -356,9 +356,9 @@ jobs:
             | **F8** | Graba la pantalla (o una ventana) hasta que la frenás |
             | **F10** | Captura de pantalla |
 
-            - Clic en el ícono (al lado del reloj): ventana **Mis clips** con miniaturas, para abrir, compartir o copiar a Discord/WhatsApp. Clic derecho: menú.
+            - Clic en el ícono (al lado del reloj): ventana **Mis clips**. Tocás un clip y lo ves y recortás ahí mismo; el botón 🔗 copia un link que abre cualquiera, tenga o no la app. Clic derecho: menú.
             - Ícono **gris** = en pausa (sin juego, no consume nada) · **naranja** = clips activos · **rojo** = grabando.
-            - El video lo comprime la placa de video (NVIDIA, AMD o Intel). Sin cuentas y sin internet.
+            - El video lo comprime la placa de video (NVIDIA, AMD o Intel). Gratis y sin cuentas.
 
             Instrucciones completas en el [README](https://github.com/${{ github.repository }}#readme) y en `LEEME.txt` dentro del zip.
 
@@ -389,9 +389,9 @@ jobs:
             | **F8** | Graba la pantalla (o una ventana) hasta que la frenás |
             | **F10** | Captura de pantalla |
 
-            - Clic en el ícono (al lado del reloj): ventana **Mis clips** con miniaturas, para abrir, compartir o copiar a Discord/WhatsApp. Clic derecho: menú.
+            - Clic en el ícono (al lado del reloj): ventana **Mis clips**. Tocás un clip y lo ves y recortás ahí mismo; el botón 🔗 copia un link que abre cualquiera, tenga o no la app. Clic derecho: menú.
             - Ícono **gris** = en pausa (sin juego, no consume nada) · **naranja** = clips activos · **rojo** = grabando.
-            - El video lo comprime la placa de video (NVIDIA, AMD o Intel). Sin cuentas y sin internet.
+            - El video lo comprime la placa de video (NVIDIA, AMD o Intel). Gratis y sin cuentas.
 
             Instrucciones completas en el [README](https://github.com/${{ github.repository }}#readme) y en `LEEME.txt` dentro del zip.
 
