@@ -26,7 +26,7 @@ mod logic {
     pub struct Config {
         pub secs: u32,
         pub fps: u32,
-        /// alto del video: 720 o 480 (PC de bajos recursos)
+        /// alto del video: 0 = automático (720 con la placa, 480 si comprime el procesador), 480 o 720
         pub height: u32,
         pub clip: Hotkey,
         pub shot: Hotkey,
@@ -47,7 +47,7 @@ mod logic {
             Config {
                 secs: 30,
                 fps: 30,
-                height: 720,
+                height: 0,
                 clip: Hotkey { vk: VK_F9, mods: 0 },
                 shot: Hotkey { vk: VK_F10, mods: 0 },
                 folder,
@@ -71,7 +71,8 @@ mod logic {
                 match (k, n) {
                     ("seconds", Some(n)) if (5..=600).contains(&n) => c.secs = n,
                     ("fps", Some(n)) if n == 30 || n == 60 => c.fps = n,
-                    ("height", Some(n)) if n == 480 || n == 720 => c.height = n,
+                    // "quality" reemplaza a "height" (las configs viejas pasan a automático)
+                    ("quality", Some(n)) if n == 0 || n == 480 || n == 720 => c.height = n,
                     ("clip_key", Some(n)) if (1..=254).contains(&n) => c.clip.vk = n,
                     ("clip_mods", Some(n)) => c.clip.mods = n & 7,
                     ("shot_key", Some(n)) if (1..=254).contains(&n) => c.shot.vk = n,
@@ -98,7 +99,7 @@ mod logic {
 
         pub fn serialize(&self) -> String {
             format!(
-                "version=2\nseconds={}\nfps={}\nheight={}\nclip_key={}\nclip_mods={}\nshot_key={}\nshot_mods={}\nfolder={}\nencoder={}\nbg={}\nrec_key={}\nrec_mods={}\nmic={}\nsound={}\ngpu_only={}\n",
+                "version=2\nseconds={}\nfps={}\nquality={}\nclip_key={}\nclip_mods={}\nshot_key={}\nshot_mods={}\nfolder={}\nencoder={}\nbg={}\nrec_key={}\nrec_mods={}\nmic={}\nsound={}\ngpu_only={}\n",
                 self.secs,
                 self.fps,
                 self.height,
@@ -173,7 +174,8 @@ mod logic {
     const AMF: &[&str] = &["-usage", "lowlatency", "-quality", "speed", "-rc", "cbr"];
     const QSV: &[&str] = &["-preset", "veryfast"];
     // x264 (sin placa que codifique): el preset más liviano y solo 2 hilos, para dejarle CPU al juego
-    const X264: &[&str] = &["-preset", "ultrafast", "-tune", "zerolatency", "-threads", "2"];
+    // los hilos se agregan según la resolución (1 hilo a 480p, 2 a 720p)
+    const X264: &[&str] = &["-preset", "ultrafast", "-tune", "zerolatency"];
     // a 720p como máximo (una ventana chica no se agranda)
     const GPU: &str = "scale_d3d11=width=-2:height=min(720\\,trunc(ih/2)*2):format=nv12";
     const CPU: &str = "hwdownload,format=bgra,scale=-2:min(720\\,trunc(ih/2)*2):flags=fast_bilinear,format=nv12";
@@ -231,12 +233,19 @@ mod logic {
         }
     }
 
-    /// Alto y fps reales para un encoder: x264 usa CPU, así que nunca pasa de 30 fps.
+    /// Alto y fps reales. Automático (0): 720p con la placa, 480p si comprime el procesador.
+    /// x264 (procesador) nunca pasa de 30 fps.
     pub fn effective(enc: usize, height: u32, fps: u32) -> (u32, u32) {
-        if ENCODERS[enc].codec == "libx264" {
-            (height, fps.min(30))
+        let cpu = ENCODERS[enc].codec == "libx264";
+        let h = match height {
+            0 if cpu => 480,
+            0 => 720,
+            h => h,
+        };
+        if cpu {
+            (h, fps.min(30))
         } else {
-            (height, fps)
+            (h, fps)
         }
     }
 
@@ -306,6 +315,9 @@ mod logic {
         }
         a.extend(s(&["-c:v", e.codec]));
         a.extend(s(e.opts));
+        if e.codec == "libx264" {
+            a.extend(s(&["-threads", if height >= 720 { "2" } else { "1" }]));
+        }
         a.extend([
             "-b:v".into(),
             format!("{br}k"),
@@ -508,6 +520,7 @@ mod logic {
             let mut c = Config::defaults("C:\\x".into());
             c.secs = 120;
             c.fps = 60;
+            c.height = 480;
             c.clip = Hotkey { vk: 0x41, mods: MOD_CONTROL | MOD_SHIFT };
             c.encoder = 3;
             c.bg = BG_OFF;
@@ -670,6 +683,15 @@ mod logic {
             // x264 en CPU: 720p si se pide, máximo 30 fps, 2 hilos
             assert!(a.contains("-map 0:v -vf hwdownload,format=bgra,scale=-2:min(720\\,trunc(ih/2)*2)"));
             assert!(a.contains("-c:v libx264 -preset ultrafast -tune zerolatency -threads 2"));
+            // automático con procesador: 480p, 1 hilo
+            let a = record_args(7, 0, 30, Source::Screen, None, Out::File("x")).join(" ");
+            assert!(a.contains("scale=-2:min(480") && a.contains("-threads 1") && a.contains("-b:v 2500k"));
+            // automático con placa: 720p
+            let a = record_args(0, 0, 30, Source::Screen, None, Out::File("x")).join(" ");
+            assert!(a.contains("height=min(720") && a.contains("-b:v 6000k") && !a.contains("-threads"));
+            assert_eq!(Config::defaults("F".into()).height, 0);
+            assert_eq!(Config::parse("height=720\n", "F".into()).height, 0);
+            assert_eq!(Config::parse("quality=720\n", "F".into()).height, 720);
             assert!(a.contains("-b:v 6000k"));
             assert!(a.contains("-g 60"));
             let a = record_args(6, 720, 60, Source::Screen, None, Out::File("x")).join(" ");
@@ -1903,8 +1925,9 @@ mod app {
                 let _ = AppendMenuW(m, MF_POPUP, dur.0 as usize, PCWSTR(t.as_ptr()));
                 let q = CreatePopupMenu().unwrap_or_default();
                 let (h, f) = (self.cfg.height, self.cfg.fps);
-                add(q, 22, "480p 30 fps (PC de bajos recursos)", h == 480 && f == 30);
-                add(q, 20, "720p 30 fps (recomendado)", h == 720 && f == 30);
+                add(q, 23, "Automática: lo justo para tu PC (recomendada)", h == 0);
+                add(q, 22, "480p 30 fps (ahorro máximo)", h == 480 && f == 30);
+                add(q, 20, "720p 30 fps", h == 720 && f == 30);
                 add(q, 21, "720p 60 fps", h == 720 && f == 60);
                 let t = wide("Calidad");
                 let _ = AppendMenuW(m, MF_POPUP, q.0 as usize, PCWSTR(t.as_ptr()));
@@ -1983,8 +2006,8 @@ mod app {
                         self.restart_rec();
                     }
                 }
-                20..=22 => {
-                    let (height, fps) = [(720, 30), (720, 60), (480, 30)][id - 20];
+                20..=23 => {
+                    let (height, fps) = [(720, 30), (720, 60), (480, 30), (0, 30)][id - 20];
                     if (height, fps) != (self.cfg.height, self.cfg.fps) {
                         self.cfg.height = height;
                         self.cfg.fps = fps;

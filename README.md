@@ -71,7 +71,10 @@ Está hecha con los controles propios de Windows: no usa un navegador por dentro
 - **Copiar último clip**: después pegalo con Ctrl+V en Discord, WhatsApp, etc.
 - **Clips en segundo plano ▸**: Solo mientras juego / Siempre / Apagado.
 - **Duración del clip**: 15 s, 30 s, 1 min, 2 min o 5 min.
-- **Calidad**: 480p 30 fps (PC de bajos recursos), 720p 30 fps (por defecto) o 720p 60 fps. Vale para clips y grabaciones. Una ventana más chica se graba en su tamaño, sin agrandarla.
+- **Calidad**:
+  - **Automática** (recomendada, viene así): usa lo justo para tu PC. Si comprime la placa, graba en 720p 30 fps. Si tiene que usar el procesador, baja a 480p 30 fps con un solo hilo.
+  - Si no, la elegís vos: 480p 30 fps (ahorro máximo), 720p 30 fps o 720p 60 fps.
+  - Vale para clips y grabaciones. Una ventana más chica se graba en su tamaño, sin agrandarla.
 - **Opciones**:
   - **Grabar micrófono**: activado por defecto.
   - **Sonido al guardar**.
@@ -118,7 +121,7 @@ Siempre, en cualquier PC:
 - Guardar un clip **nunca** recomprime: une los pedazos en un mp4, con prioridad baja. No debería trabar el juego.
 - Con 4 GB de RAM: en reposo Jugadón no ocupa casi nada. Mientras graba, el que ocupa RAM es `ffmpeg.exe`; miralo en el Administrador de tareas.
 
-Para menos impacto todavía, dejá **720p 30 fps** (el de fábrica) o bajá a **480p**. 60 fps duplica el trabajo de captura.
+Con **Calidad → Automática** (la de fábrica) Jugadón ya usa lo justo. Para gastar todavía menos, elegí **480p 30 fps**. Evitá 60 fps en PCs lentas: duplica el trabajo de la placa.
 
 **RAM:**
 - **En reposo** (sin juego): solo corre `jugadon.exe`, y apunta a menos de 4 MB.
