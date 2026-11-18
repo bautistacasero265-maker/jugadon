@@ -8,6 +8,11 @@ on:
 permissions:
   contents: write
 
+# una compilación a la vez (dos publicando juntas a veces chocan)
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 env:
   # FFmpeg 8.1.x (gyan.dev, espejo en GitHub). GPL. 8.1 trae gfxcapture (grabar una ventana).
   # Se usa la primera versión de esta lista fija que exista.
@@ -221,6 +226,8 @@ jobs:
             ventana.png
 
       - name: Publicar release
+        id: rel
+        continue-on-error: true
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v1.0.${{ github.run_number }}
@@ -229,9 +236,54 @@ jobs:
           prerelease: ${{ github.ref_name != github.event.repository.default_branch }}
           files: Jugadon-windows-x64.zip
           body: |
-            Bajá **Jugadon-windows-x64.zip**, descomprimilo en una carpeta y abrí `jugadon.exe`.
-            Aparece el ícono de Jugadón en la bandeja, al lado del reloj: **gris** = en pausa (sin juego), **naranja** = grabando.
-            **F9** guarda el clip, **F10** saca captura, **F8** graba/frena. Clic en el ícono: ventana "Mis clips" para abrir, compartir o copiar. Clic derecho: menú.
-            Instrucciones completas en el README del repo y en LEEME.txt dentro del zip.
+            ## Jugadón: clips de juegos livianos para Windows 10/11
 
-            Compilado desde el commit ${{ github.sha }} (rama `${{ github.ref_name }}`).
+            **Cómo instalar:** bajá **Jugadon-windows-x64.zip** (abajo, en *Assets*), descomprimilo en una carpeta y abrí `jugadon.exe`. No necesita instalación.
+            Si Windows dice "Windows protegió su PC": **Más información → Ejecutar de todas formas** (el programa no está firmado).
+
+            | Tecla | Qué hace |
+            |---|---|
+            | **F9** | Guarda los últimos segundos como clip |
+            | **F8** | Graba la pantalla (o una ventana) hasta que la frenás |
+            | **F10** | Captura de pantalla |
+
+            - Clic en el ícono (al lado del reloj): ventana **Mis clips** con miniaturas, para abrir, compartir o copiar a Discord/WhatsApp. Clic derecho: menú.
+            - Ícono **gris** = en pausa (sin juego, no consume nada) · **naranja** = clips activos · **rojo** = grabando.
+            - El video lo comprime la placa de video (NVIDIA, AMD o Intel). Sin cuentas y sin internet.
+
+            Instrucciones completas en el [README](https://github.com/${{ github.repository }}#readme) y en `LEEME.txt` dentro del zip.
+
+            <sub>Compilado desde el commit ${{ github.sha }}.</sub>
+
+      - name: Esperar y reintentar la publicación
+        if: steps.rel.outcome == 'failure'
+        run: Start-Sleep -Seconds 30
+
+      - name: Publicar release (reintento)
+        if: steps.rel.outcome == 'failure'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: Jugadón v1.0.${{ github.run_number }}
+          target_commitish: ${{ github.sha }}
+          prerelease: ${{ github.ref_name != github.event.repository.default_branch }}
+          files: Jugadon-windows-x64.zip
+          body: |
+            ## Jugadón: clips de juegos livianos para Windows 10/11
+
+            **Cómo instalar:** bajá **Jugadon-windows-x64.zip** (abajo, en *Assets*), descomprimilo en una carpeta y abrí `jugadon.exe`. No necesita instalación.
+            Si Windows dice "Windows protegió su PC": **Más información → Ejecutar de todas formas** (el programa no está firmado).
+
+            | Tecla | Qué hace |
+            |---|---|
+            | **F9** | Guarda los últimos segundos como clip |
+            | **F8** | Graba la pantalla (o una ventana) hasta que la frenás |
+            | **F10** | Captura de pantalla |
+
+            - Clic en el ícono (al lado del reloj): ventana **Mis clips** con miniaturas, para abrir, compartir o copiar a Discord/WhatsApp. Clic derecho: menú.
+            - Ícono **gris** = en pausa (sin juego, no consume nada) · **naranja** = clips activos · **rojo** = grabando.
+            - El video lo comprime la placa de video (NVIDIA, AMD o Intel). Sin cuentas y sin internet.
+
+            Instrucciones completas en el [README](https://github.com/${{ github.repository }}#readme) y en `LEEME.txt` dentro del zip.
+
+            <sub>Compilado desde el commit ${{ github.sha }}.</sub>
