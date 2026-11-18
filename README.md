@@ -57,7 +57,7 @@ Los clips y capturas van a `Videos\Jugadon`. Al guardar suena un "tin-tin" y apa
 - **Copiar último clip**: después pegalo con Ctrl+V en Discord, WhatsApp, etc.
 - **Clips en segundo plano ▸**: Solo mientras juego / Siempre / Apagado.
 - **Duración del clip**: 15 s, 30 s, 1 min, 2 min o 5 min.
-- **Calidad**: 720p 30 fps (por defecto) o 720p 60 fps. Vale para clips y grabaciones. Una ventana más chica que 720p se graba en su tamaño, sin agrandarla.
+- **Calidad**: 480p 30 fps (PC de bajos recursos), 720p 30 fps (por defecto) o 720p 60 fps. Vale para clips y grabaciones. Una ventana más chica se graba en su tamaño, sin agrandarla.
 - **Opciones**:
   - **Grabar micrófono**: desactivado por defecto.
   - **Sonido al guardar**.
@@ -79,7 +79,23 @@ La configuración está en `%APPDATA%\Jugadon\config.ini`. Ahí también se pued
 - **Nada en RAM.** El buffer está en el disco: ocupa unos 1,5 MB por cada 2 s a 30 fps (unos 230 MB con 5 min) y se borra al salir.
 - Si la GPU no puede codificar, Jugadón pasa solo a otra opción. La última es x264 en CPU, y esa **sí** consume CPU. Si pasa eso, el ícono lo dice.
 
-Para menos impacto todavía, dejá **720p 30 fps** (el de fábrica). 60 fps duplica el trabajo de captura.
+### PC de bajos recursos (por ejemplo i3-2100 con 4 GB)
+
+Jugadón está pensado para estas PCs. Hay una sola cosa que define si se nota o no: **si tu placa de video puede comprimir video por su cuenta**.
+
+| Tu placa | Qué pasa |
+|---|---|
+| NVIDIA GTX 600 o más nueva (no la GT 1030), AMD con VCE, Intel HD 4000 o más nueva | Comprime la placa, en un chip aparte. La CPU casi no trabaja y no deberías notar bajón de FPS. |
+| Placas más viejas o sin encoder (por ejemplo Intel HD 2000/3000 del i3-2100, GT 710/1030) | Jugadón pasa solo a x264. Ahí comprime la CPU, así que se limita a **480p 30 fps** con 2 hilos y prioridad baja. En un procesador de 2 núcleos **se puede notar algo de FPS**; ese es el costo de no tener encoder en la placa. |
+
+Si pasás el mouse por el ícono, te dice cuál está usando. Si dice "usa CPU", tenés dos opciones: grabar solo cuando haga falta (**Clips en segundo plano → Apagado** y F8 cuando quieras), o usar **Calidad → 480p 30 fps**.
+
+En todos los casos:
+- **Clips en segundo plano → Solo mientras juego** (viene así): fuera del juego no corre nada.
+- Guardar un clip **nunca** recomprime: une los pedazos en un mp4, con prioridad baja. No debería trabar el juego.
+- Con 4 GB de RAM: en reposo Jugadón no ocupa casi nada. Mientras graba, el que ocupa RAM es `ffmpeg.exe`; miralo en el Administrador de tareas.
+
+Para menos impacto todavía, dejá **720p 30 fps** (el de fábrica) o bajá a **480p**. 60 fps duplica el trabajo de captura.
 
 **RAM:**
 - **En reposo** (sin juego): solo corre `jugadon.exe`, y apunta a menos de 4 MB.

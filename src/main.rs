@@ -26,6 +26,8 @@ mod logic {
     pub struct Config {
         pub secs: u32,
         pub fps: u32,
+        /// alto del video: 720 o 480 (PC de bajos recursos)
+        pub height: u32,
         pub clip: Hotkey,
         pub shot: Hotkey,
         pub folder: String,
@@ -43,6 +45,7 @@ mod logic {
             Config {
                 secs: 30,
                 fps: 30,
+                height: 720,
                 clip: Hotkey { vk: VK_F9, mods: 0 },
                 shot: Hotkey { vk: VK_F10, mods: 0 },
                 folder,
@@ -63,6 +66,7 @@ mod logic {
                 match (k, n) {
                     ("seconds", Some(n)) if (5..=600).contains(&n) => c.secs = n,
                     ("fps", Some(n)) if n == 30 || n == 60 => c.fps = n,
+                    ("height", Some(n)) if n == 480 || n == 720 => c.height = n,
                     ("clip_key", Some(n)) if (1..=254).contains(&n) => c.clip.vk = n,
                     ("clip_mods", Some(n)) => c.clip.mods = n & 7,
                     ("shot_key", Some(n)) if (1..=254).contains(&n) => c.shot.vk = n,
@@ -88,9 +92,10 @@ mod logic {
 
         pub fn serialize(&self) -> String {
             format!(
-                "seconds={}\nfps={}\nclip_key={}\nclip_mods={}\nshot_key={}\nshot_mods={}\nfolder={}\nencoder={}\nbg={}\nrec_key={}\nrec_mods={}\nmic={}\nsound={}\n",
+                "seconds={}\nfps={}\nheight={}\nclip_key={}\nclip_mods={}\nshot_key={}\nshot_mods={}\nfolder={}\nencoder={}\nbg={}\nrec_key={}\nrec_mods={}\nmic={}\nsound={}\n",
                 self.secs,
                 self.fps,
+                self.height,
                 self.clip.vk,
                 self.clip.mods,
                 self.shot.vk,
@@ -158,12 +163,15 @@ mod logic {
     const NV: &[&str] = &["-preset", "p1", "-tune", "ll", "-rc", "cbr"];
     const AMF: &[&str] = &["-usage", "lowlatency", "-quality", "speed", "-rc", "cbr"];
     const QSV: &[&str] = &["-preset", "veryfast"];
+    // x264 (sin placa que codifique): el preset más liviano y solo 2 hilos, para dejarle CPU al juego
+    const X264: &[&str] = &["-preset", "ultrafast", "-tune", "zerolatency", "-threads", "2"];
     // a 720p como máximo (una ventana chica no se agranda)
     const GPU: &str = "scale_d3d11=width=-2:height=min(720\\,trunc(ih/2)*2):format=nv12";
     const CPU: &str = "hwdownload,format=bgra,scale=-2:min(720\\,trunc(ih/2)*2):flags=fast_bilinear,format=nv12";
 
     /// Orden de prueba: todo en GPU primero, después escalado en CPU, último x264.
-    pub const ENCODERS: [Enc; 7] = [
+    /// ("720" en vf se reemplaza por el alto elegido.)
+    pub const ENCODERS: [Enc; 8] = [
         Enc { label: "NVENC", vf: GPU, codec: "h264_nvenc", opts: NV },
         Enc { label: "AMF", vf: GPU, codec: "h264_amf", opts: AMF },
         Enc {
@@ -175,19 +183,26 @@ mod logic {
         Enc { label: "NVENC (escala CPU)", vf: CPU, codec: "h264_nvenc", opts: NV },
         Enc { label: "AMF (escala CPU)", vf: CPU, codec: "h264_amf", opts: AMF },
         Enc { label: "QSV (escala CPU)", vf: CPU, codec: "h264_qsv", opts: QSV },
-        Enc {
-            label: "x264 (CPU)",
-            vf: CPU,
-            codec: "libx264",
-            opts: &["-preset", "ultrafast", "-tune", "zerolatency"],
-        },
+        // la placa escala (barato) y la CPU solo comprime un video chico
+        Enc { label: "x264 (escala GPU)", vf: "scale_d3d11=width=-2:height=min(720\\,trunc(ih/2)*2):format=nv12,hwdownload,format=nv12", codec: "libx264", opts: X264 },
+        Enc { label: "x264 (CPU)", vf: CPU, codec: "libx264", opts: X264 },
     ];
 
-    pub fn bitrate_mbit(fps: u32) -> u32 {
-        if fps >= 60 {
-            9
+    /// Alto y fps reales para un encoder: x264 usa CPU, así que se limita a 480p 30 fps.
+    pub fn effective(enc: usize, height: u32, fps: u32) -> (u32, u32) {
+        if ENCODERS[enc].codec == "libx264" {
+            (height.min(480), fps.min(30))
         } else {
-            6
+            (height, fps)
+        }
+    }
+
+    pub fn bitrate_kbit(height: u32, fps: u32) -> u32 {
+        match (height >= 720, fps >= 60) {
+            (true, true) => 9000,
+            (true, false) => 6000,
+            (false, true) => 4000,
+            (false, false) => 2500,
         }
     }
 
@@ -211,9 +226,11 @@ mod logic {
     }
 
     /// Argumentos de grabación. audio = (Hz, canales) de PCM f32 por stdin.
-    pub fn record_args(enc: usize, fps: u32, src: Source, audio: Option<(u32, u16)>, out: Out) -> Vec<String> {
+    pub fn record_args(enc: usize, height: u32, fps: u32, src: Source, audio: Option<(u32, u16)>, out: Out) -> Vec<String> {
         let e = &ENCODERS[enc];
-        let br = bitrate_mbit(fps);
+        let (height, fps) = effective(enc, height, fps);
+        let br = bitrate_kbit(height, fps);
+        let vf = e.vf.replace("720", &height.to_string());
         // un solo hilo de filtros: todo el trabajo pesado está en la GPU
         let mut a = s(&["-hide_banner", "-loglevel", "warning", "-nostats", "-filter_threads", "1"]);
         if audio.is_none() {
@@ -226,7 +243,7 @@ mod logic {
         });
         if let Some((rate, ch)) = audio {
             // sin probesize/analyzeduration ffmpeg lee ~5 s de audio antes de arrancar el video (desfase)
-            a.extend(s(&["-thread_queue_size", "1024", "-probesize", "32", "-analyzeduration", "0", "-f", "f32le", "-ar"]));
+            a.extend(s(&["-thread_queue_size", "128", "-probesize", "32", "-analyzeduration", "0", "-f", "f32le", "-ar"]));
             a.push(rate.to_string());
             a.push("-ac".into());
             a.push(ch.to_string());
@@ -234,7 +251,7 @@ mod logic {
         } else {
             a.extend(s(&["-map", "0:v"]));
         }
-        a.extend(s(&["-vf", e.vf]));
+        a.extend(["-vf".into(), vf]);
         if matches!(src, Source::Window(_)) {
             // la captura de ventana manda cuadros solo cuando la ventana cambia: video a fps fijos
             a.extend(["-fps_mode".into(), "cfr".into(), "-r".into(), fps.to_string()]);
@@ -243,18 +260,18 @@ mod logic {
         a.extend(s(e.opts));
         a.extend([
             "-b:v".into(),
-            format!("{br}M"),
+            format!("{br}k"),
             "-maxrate".into(),
-            format!("{br}M"),
+            format!("{br}k"),
             "-bufsize".into(),
-            format!("{}M", br * 2),
+            format!("{}k", br * 2),
             "-g".into(),
             (fps * 2).to_string(),
             "-bf".into(),
             "0".into(),
         ]);
         if audio.is_some() {
-            a.extend(s(&["-c:a", "aac", "-b:a", "160k"]));
+            a.extend(s(&["-c:a", "aac", "-b:a", if height >= 720 { "160k" } else { "128k" }]));
         }
         match out {
             Out::Segments { secs, dir } => {
@@ -501,12 +518,12 @@ mod logic {
 
         #[test]
         fn record_args_gpu_with_audio() {
-            let a = record_args(0, 60, Source::Screen, Some((48000, 2)), Out::Segments { secs: 30, dir: "C:\\T\\jugadon_buf" }).join(" ");
+            let a = record_args(0, 720, 60, Source::Screen, Some((48000, 2)), Out::Segments { secs: 30, dir: "C:\\T\\jugadon_buf" }).join(" ");
             assert!(a.contains("-f lavfi -i ddagrab=framerate=60:draw_mouse=1"));
             assert!(a.starts_with("-hide_banner -loglevel warning -nostats -filter_threads 1 -f lavfi"));
-            assert!(a.contains("-thread_queue_size 1024 -probesize 32 -analyzeduration 0 -f f32le -ar 48000 -ac 2 -i pipe:0 -map 0:v -map 1:a"));
+            assert!(a.contains("-thread_queue_size 128 -probesize 32 -analyzeduration 0 -f f32le -ar 48000 -ac 2 -i pipe:0 -map 0:v -map 1:a"));
             assert!(a.contains("-vf scale_d3d11=width=-2:height=min(720\\,trunc(ih/2)*2):format=nv12 -c:v h264_nvenc -preset p1 -tune ll -rc cbr"));
-            assert!(a.contains("-b:v 9M -maxrate 9M -bufsize 18M -g 120 -bf 0"));
+            assert!(a.contains("-b:v 9000k -maxrate 9000k -bufsize 18000k -g 120 -bf 0"));
             assert!(a.contains("-c:a aac -b:a 160k"));
             assert!(a.ends_with("-f segment -segment_time 2 -segment_wrap 20 -segment_format mpegts C:\\T\\jugadon_buf\\seg%03d.ts"));
             assert!(!a.contains("-nostdin"));
@@ -515,26 +532,33 @@ mod logic {
 
         #[test]
         fn record_args_cpu_no_audio() {
-            let a = record_args(6, 30, Source::Screen, None, Out::Segments { secs: 60, dir: "D" }).join(" ");
+            let a = record_args(7, 720, 30, Source::Screen, None, Out::Segments { secs: 60, dir: "D" }).join(" ");
             assert!(a.contains("-nostdin"));
-            assert!(a.contains("-map 0:v -vf hwdownload,format=bgra,scale=-2:min(720\\,trunc(ih/2)*2)"));
-            assert!(a.contains("-c:v libx264 -preset ultrafast"));
-            assert!(a.contains("-b:v 6M"));
+            // x264 en CPU: siempre 480p 30 fps y 2 hilos, aunque se pida 720p
+            assert!(a.contains("-map 0:v -vf hwdownload,format=bgra,scale=-2:min(480\\,trunc(ih/2)*2)"));
+            assert!(a.contains("-c:v libx264 -preset ultrafast -tune zerolatency -threads 2"));
+            assert!(a.contains("-b:v 2500k"));
             assert!(a.contains("-g 60"));
+            let a = record_args(6, 720, 60, Source::Screen, None, Out::File("x")).join(" ");
+            assert!(a.contains("ddagrab=framerate=30:"));
+            assert!(a.contains("scale_d3d11=width=-2:height=min(480\\,trunc(ih/2)*2):format=nv12,hwdownload,format=nv12"));
+            // 480p elegido por el usuario, con encoder de placa
+            let a = record_args(0, 480, 30, Source::Screen, None, Out::File("x")).join(" ");
+            assert!(a.contains("height=min(480") && a.contains("-b:v 2500k") && a.contains("h264_nvenc"));
             assert!(!a.contains("pipe:0"));
             assert!(!a.contains("-c:a"));
             for i in 0..ENCODERS.len() {
-                assert!(record_args(i, 30, Source::Screen, None, Out::File("x.ts")).iter().any(|x| x == ENCODERS[i].codec));
+                assert!(record_args(i, 720, 30, Source::Screen, None, Out::File("x.ts")).iter().any(|x| x == ENCODERS[i].codec));
             }
         }
 
         #[test]
         fn manual_recording_args() {
-            let a = record_args(0, 30, Source::Window(1234), None, Out::File("C:\\T\\rec.ts")).join(" ");
+            let a = record_args(0, 720, 30, Source::Window(1234), None, Out::File("C:\\T\\rec.ts")).join(" ");
             assert!(a.contains("-i gfxcapture=hwnd=1234:max_framerate=30:capture_cursor=1 "));
             assert!(a.contains("format=nv12 -fps_mode cfr -r 30 -c:v h264_nvenc"));
             assert!(!a.contains("ddagrab"));
-            assert!(!record_args(0, 30, Source::Screen, None, Out::File("x")).join(" ").contains("-fps_mode"));
+            assert!(!record_args(0, 720, 30, Source::Screen, None, Out::File("x")).join(" ").contains("-fps_mode"));
             assert!(a.ends_with("-y -f mpegts C:\\T\\rec.ts"));
             assert!(!a.contains("segment"));
             let r = remux_args("a.ts", "b.mp4").join(" ");
@@ -583,7 +607,7 @@ mod win_tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let dirs = dir.to_string_lossy().into_owned();
-        let mut args = logic::record_args(6, 30, logic::Source::Screen, Some((48000, 2)), logic::Out::Segments { secs: 6, dir: &dirs });
+        let mut args = logic::record_args(7, 720, 30, logic::Source::Screen, Some((48000, 2)), logic::Out::Segments { secs: 6, dir: &dirs });
         for a in args.iter_mut() {
             if a.starts_with("ddagrab=") {
                 *a = "testsrc2=size=1920x1080:rate=30,realtime".into();
@@ -640,7 +664,8 @@ mod win_tests {
         let info = String::from_utf8_lossy(&o.stdout).to_string();
         eprintln!("{info}");
         assert!(info.contains("codec_name=h264") && info.contains("codec_name=aac"), "{info}");
-        assert!(info.contains("width=1280") && info.contains("height=720"), "{info}");
+        // x264 (sin placa de video en CI) graba a 480p para no cargar la CPU
+        assert!(info.contains("height=480"), "{info}");
         let durs: Vec<f64> = info.lines().filter_map(|l| l.strip_prefix("duration=")).filter_map(|v| v.parse().ok()).collect();
         assert_eq!(durs.len(), 2, "{info}");
         assert!(durs.iter().all(|d| (5.0..=9.0).contains(d)), "duración rara: {durs:?}");
@@ -664,7 +689,7 @@ mod win_tests_manual {
         let tmp = std::env::temp_dir();
         let ts = tmp.join("jugadon_test_rec.ts").to_string_lossy().into_owned();
         let mp4 = tmp.join("jugadon_test_rec.mp4").to_string_lossy().into_owned();
-        let mut args = logic::record_args(6, 30, logic::Source::Window(0), None, logic::Out::File(&ts));
+        let mut args = logic::record_args(7, 720, 30, logic::Source::Window(0), None, logic::Out::File(&ts));
         for a in args.iter_mut() {
             if a.starts_with("gfxcapture=") {
                 *a = "testsrc2=size=800x601:rate=30,realtime".into(); // alto impar a propósito
@@ -685,8 +710,8 @@ mod win_tests_manual {
             .unwrap();
         let info = String::from_utf8_lossy(&o.stdout).to_string();
         eprintln!("{info}");
-        // 601 px de alto -> 600: una ventana chica no se agranda a 720 y queda par
-        assert!(info.contains("codec_name=h264") && info.contains("height=600"), "{info}");
+        // x264 limita a 480p (una ventana más chica no se agrandaría)
+        assert!(info.contains("codec_name=h264") && info.contains("height=480"), "{info}");
         let dur: f64 = info.lines().find_map(|l| l.strip_prefix("duration=")).and_then(|v| v.parse().ok()).unwrap_or(0.0);
         assert!((1.5..=5.0).contains(&dur), "duración rara: {dur}");
     }
@@ -1026,7 +1051,8 @@ mod app {
                 } else {
                     ""
                 };
-                format!("Grabando ({}{audio})", ENCODERS[self.rec.enc].label)
+                let cpu = if ENCODERS[self.rec.enc].codec == "libx264" { " – sin encoder de placa: usa CPU" } else { "" };
+                format!("Grabando ({}{audio}){cpu}", ENCODERS[self.rec.enc].label)
             } else if self.rec.gave_up {
                 "Sin grabar: error (mirá jugadon.log)".to_string()
             } else if self.rec.child.is_none() && !self.want_rec() {
@@ -1037,7 +1063,9 @@ mod app {
         }
 
         fn tip(&self) -> String {
-            format!("Jugadón – {}\n720p {} fps · últimos {} s", self.status(), self.cfg.fps, self.cfg.secs)
+            let enc = self.manual.as_ref().map_or(self.rec.enc, |m| m.enc);
+            let (h, f) = logic::effective(enc, self.cfg.height, self.cfg.fps);
+            format!("Jugadón – {}\n{h}p {f} fps · últimos {} s", self.status(), self.cfg.secs)
         }
 
         fn icon(&self) -> HICON {
@@ -1131,7 +1159,7 @@ mod app {
                 None => None,
             };
             let fmt = audio.as_ref().map(|(a, _)| (a.rate, a.channels));
-            let args = logic::record_args(enc, self.cfg.fps, src, fmt, out);
+            let args = logic::record_args(enc, self.cfg.height, self.cfg.fps, src, fmt, out);
             let audio_desc = fmt.map_or("no".to_string(), |f| format!("{} Hz, {} canales", f.0, f.1));
             log_line(&self.log_path, &format!("iniciando {} {} fps (audio: {audio_desc}, fuente: {src:?})", ENCODERS[enc].label, self.cfg.fps));
             let mut cmd = Command::new(&self.ffmpeg);
@@ -1593,8 +1621,10 @@ mod app {
                 let t = wide("Duración del clip");
                 let _ = AppendMenuW(m, MF_POPUP, dur.0 as usize, PCWSTR(t.as_ptr()));
                 let q = CreatePopupMenu().unwrap_or_default();
-                add(q, 20, "720p 30 fps", self.cfg.fps == 30);
-                add(q, 21, "720p 60 fps", self.cfg.fps == 60);
+                let (h, f) = (self.cfg.height, self.cfg.fps);
+                add(q, 22, "480p 30 fps (PC de bajos recursos)", h == 480 && f == 30);
+                add(q, 20, "720p 30 fps (recomendado)", h == 720 && f == 30);
+                add(q, 21, "720p 60 fps", h == 720 && f == 60);
                 let t = wide("Calidad");
                 let _ = AppendMenuW(m, MF_POPUP, q.0 as usize, PCWSTR(t.as_ptr()));
                 let o = CreatePopupMenu().unwrap_or_default();
@@ -1657,9 +1687,10 @@ mod app {
                         self.restart_rec();
                     }
                 }
-                20 | 21 => {
-                    let fps = if id == 20 { 30 } else { 60 };
-                    if fps != self.cfg.fps {
+                20..=22 => {
+                    let (height, fps) = [(720, 30), (720, 60), (480, 30)][id - 20];
+                    if (height, fps) != (self.cfg.height, self.cfg.fps) {
+                        self.cfg.height = height;
                         self.cfg.fps = fps;
                         self.save_cfg();
                         self.restart_rec();

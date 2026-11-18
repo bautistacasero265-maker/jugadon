@@ -31,7 +31,7 @@ Menú -> "Copiar último clip" y lo pegás con Ctrl+V en Discord o WhatsApp.
 
 Clic en el ícono para abrir el menú. Ahí podés:
   - cambiar la duración (15 s a 5 min)
-  - cambiar la calidad (720p 30 o 60 fps)
+  - cambiar la calidad (480p 30 para PCs lentas, 720p 30 o 60 fps)
   - activar el micrófono o sacar el sonido (Opciones)
   - cambiar las teclas
   - abrir la carpeta
