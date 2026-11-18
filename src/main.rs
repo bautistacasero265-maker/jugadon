@@ -463,8 +463,10 @@ mod logic {
     pub fn fmt_size(bytes: u64) -> String {
         if bytes >= 1 << 30 {
             format!("{:.1} GB", bytes as f64 / (1u64 << 30) as f64)
-        } else {
+        } else if bytes >= 1 << 20 {
             format!("{:.1} MB", bytes as f64 / (1u64 << 20) as f64)
+        } else {
+            format!("{} KB", bytes.div_ceil(1024))
         }
     }
 
@@ -632,6 +634,7 @@ mod logic {
             assert_eq!(describe_file("mi video.mp4"), ("Video", String::new()));
             assert_eq!(fmt_size(5 * 1024 * 1024 + 512 * 1024), "5.5 MB");
             assert_eq!(fmt_size(3 << 30), "3.0 GB");
+            assert_eq!(fmt_size(60_000), "59 KB");
         }
 
         #[test]
