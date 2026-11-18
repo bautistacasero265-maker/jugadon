@@ -164,9 +164,18 @@ jobs:
           }
           "@
           $p = Start-Process -FilePath Jugadon\jugadon.exe -ArgumentList "--clips" -WorkingDirectory Jugadon -PassThru
-          Start-Sleep -Seconds 15
-          $h = [W]::FindWindow("jugadon_gallery", $null)
-          if ($h -eq [IntPtr]::Zero) { throw "No se abrió la ventana Mis clips" }
+          $h = [IntPtr]::Zero
+          for ($k = 0; $k -lt 30 -and $h -eq [IntPtr]::Zero; $k++) {
+            Start-Sleep -Seconds 1
+            $h = [W]::FindWindow("jugadon_gallery", $null)
+          }
+          Write-Host "----- jugadon.log -----"
+          Get-Content "$env:TEMP\jugadon.log" -ErrorAction SilentlyContinue | Select-Object -Last 30
+          if ($h -eq [IntPtr]::Zero) {
+            Write-Host "Procesos: $(Get-Process jugadon -ErrorAction SilentlyContinue | Select-Object Id, MainWindowTitle, Responding | Out-String)"
+            throw "No se abrió la ventana Mis clips"
+          }
+          Start-Sleep -Seconds 8
           [W]::SetForegroundWindow($h) | Out-Null
           Start-Sleep -Seconds 2
           $r = New-Object W+RECT

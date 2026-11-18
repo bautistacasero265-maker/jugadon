@@ -2142,8 +2142,10 @@ mod app {
                     Some(hinst),
                     None,
                 ) else {
+                    log_line(&self.log_path, &format!("no se pudo crear la ventana de clips: {:?}", GetLastError()));
                     return;
                 };
+                log_line(&self.log_path, "ventana de clips abierta");
                 dark_title_bar(hwnd);
                 let _ = SendMessageW(hwnd, WM_SETICON, Some(WPARAM(ICON_SMALL as usize)), Some(LPARAM(self.icon_on.0 as isize)));
                 let big = load_icon_size(hinst, 1, GetSystemMetrics(SM_CXICON));
@@ -2874,7 +2876,9 @@ mod app {
                 hbrBackground: CreateSolidBrush(COLORREF(BG_COLOR)),
                 ..Default::default()
             };
-            RegisterClassW(&gwc);
+            if RegisterClassW(&gwc) == 0 {
+                log_line(&log_path, &format!("no se pudo registrar la clase de la ventana de clips: {:?}", GetLastError()));
+            }
             TASKBAR_CREATED.store(RegisterWindowMessageW(w!("TaskbarCreated")), Ordering::Relaxed);
             let Ok(hwnd) = CreateWindowExW(WS_EX_TOOLWINDOW, class, w!("Jugadón"), WS_POPUP, 0, 0, 0, 0, None, None, Some(hinst.into()), None) else {
                 return;
