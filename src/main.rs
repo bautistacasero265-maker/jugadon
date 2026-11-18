@@ -366,7 +366,9 @@ mod logic {
                 a.push(format!("{dir}\\seg%03d.ts"));
             }
             // .ts: si algo se corta, lo grabado hasta ahí sigue sirviendo
-            Out::File(path) => a.extend(s(&["-y", "-f", "mpegts", path])),
+            // y cada cuadro se escribe en el momento: al frenar no se pierde lo que quedaba en memoria
+            // (con imagen quieta un video ocupa tan poco que antes no llegaba a escribirse nada)
+            Out::File(path) => a.extend(s(&["-flush_packets", "1", "-y", "-f", "mpegts", path])),
         }
         a
     }
@@ -757,7 +759,7 @@ mod logic {
             assert!(a.contains("format=nv12 -fps_mode cfr -r 30 -c:v h264_nvenc"));
             assert!(!a.contains("ddagrab"));
             assert!(!record_args(0, 720, 30, Source::Screen, None, Out::File("x")).join(" ").contains("-fps_mode"));
-            assert!(a.ends_with("-y -f mpegts C:\\T\\rec.ts"));
+            assert!(a.ends_with("-flush_packets 1 -y -f mpegts C:\\T\\rec.ts"));
             assert!(!a.contains("segment"));
             let r = remux_args("a.ts", "b.mp4").join(" ");
             assert!(r.contains("-i a.ts -map 0 -c copy -movflags +faststart b.mp4"));

@@ -233,16 +233,18 @@ jobs:
           path: e2e/*.png
           if-no-files-found: ignore
 
-      - name: Guardar la foto de la ventana en el repo (solo al ejecutar a mano)
-        if: github.event_name == 'workflow_dispatch'
+      - name: Guardar las fotos de la ventana en el repo (solo al ejecutar a mano)
+        if: always() && github.event_name == 'workflow_dispatch'
         run: |
-          Copy-Item ventana.png assets\captura_ventana.png -Force
+          if (Test-Path ventana.png) { Copy-Item ventana.png assets\captura_ventana.png -Force }
+          New-Item -ItemType Directory -Force assets\pruebas | Out-Null
+          Copy-Item e2e\*.png assets\pruebas\ -Force -ErrorAction SilentlyContinue
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add assets/captura_ventana.png
+          git add assets/captura_ventana.png assets/pruebas
           git diff --cached --quiet
           if ($LASTEXITCODE -ne 0) {
-            git commit -m "Foto de la ventana Mis clips (generada en CI)"
+            git commit -m "Fotos de la ventana Mis clips (generadas en CI)"
             git pull --rebase origin main
             git push origin HEAD:main
           }
