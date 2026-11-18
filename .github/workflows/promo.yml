@@ -29,8 +29,9 @@ jobs:
       - name: Instalar ffmpeg, Piper (voz) y librerías
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq ffmpeg
-          pip install -q "piper-tts==1.2.0" pillow numpy
+          sudo apt-get install -y -qq ffmpeg fonts-noto-color-emoji
+          # voz neural argentina (edge-tts); Piper queda de respaldo
+          pip install -q "edge-tts==7.3.1" "piper-tts==1.2.0" pillow numpy
 
       - name: Bajar la voz en español
         run: |
@@ -49,10 +50,10 @@ jobs:
 
       - name: Armar el video
         run: |
-          python promo/make_promo.py --voice "$VOICE" --out out/Jugadon-promo.mp4
+          python promo/make_promo.py --voice "$VOICE" --out out/Jugadon-promo.mp4 --tmp tmp
           ffprobe -v error -show_entries format=duration,size -of compact out/Jugadon-promo.mp4
           # portada (el gancho)
-          ffmpeg -y -loglevel error -ss 1.6 -i out/Jugadon-promo.mp4 -frames:v 1 -q:v 2 out/Jugadon-promo-portada.jpg
+          ffmpeg -y -loglevel error -ss 1.0 -i out/Jugadon-promo.mp4 -frames:v 1 -q:v 2 out/Jugadon-promo-portada.jpg
 
       - uses: actions/upload-artifact@v4
         with:
@@ -70,7 +71,7 @@ jobs:
             out/Jugadon-promo.mp4
             out/Jugadon-promo-portada.jpg
           body: |
-            Video promocional vertical (1080×1920, ~30 s) para **TikTok, Instagram Reels y YouTube Shorts**.
+            Video promocional vertical (1080×1920, ~22 s) para **TikTok, Instagram Reels y YouTube Shorts**.
 
             - Bajá **Jugadon-promo.mp4** (abajo, en *Assets*) y subilo tal cual.
             - **Jugadon-promo-portada.jpg** sirve de portada/miniatura.
@@ -80,4 +81,4 @@ jobs:
             > ¿Te pasó de hacer la jugada de tu vida y no estar grabando? 😭 Jugadón guarda los últimos 30 segundos con una tecla, lo comprime tu placa de video y no te baja los FPS. Recortás mientras lo ves y compartís un link que abre cualquiera. Gratis y sin cuentas. Link en la bio 🎮
             > #gaming #clips #pcgaming #valorant #fortnite #cs2 #setup #gamer #parati #fyp
 
-            Música, efectos, imágenes y voz generados automáticamente (voz: Piper TTS). La app real se descarga desde [Releases](https://github.com/${{ github.repository }}/releases/latest).
+            Música, efectos, imágenes y voz generados automáticamente (voz neural es-AR de Microsoft vía edge-tts). La app real se descarga desde [Releases](https://github.com/${{ github.repository }}/releases/latest).

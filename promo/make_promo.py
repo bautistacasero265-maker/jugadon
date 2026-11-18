@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
-"""Video promocional vertical (1080x1920, ~30 s) de Jugadón, para TikTok / Reels / Shorts.
+"""Video promocional vertical (1080x1920, ~25 s) de Jugadón, para TikTok / Reels / Shorts.
 
-Todo se genera acá: imágenes con PIL, música y efectos sintetizados con numpy, voz con Piper
-(si se pasa --voice; sin voz sale igual, en silencio, para probar). Se arma con ffmpeg.
+Se genera todo acá, en la nube:
+- voz neural argentina (edge-tts, es-AR) con el momento exacto de cada palabra; si falla, Piper.
+- imágenes con PIL, música y efectos sintetizados con numpy, armado con ffmpeg.
 
-Estructura de video viral: gancho en los primeros 2 s, cortes rápidos (una idea por escena),
-subtítulos grandes palabra por palabra, "zoom punch" y destellos en cada corte, efectos de sonido,
-música con caída ("drop") después del gancho y llamado a la acción al final.
+Lo que lo hace "adictivo" (retención):
+- gancho con freno: kill-feed de un ACE, se congela con "scratch" de disco y el sello "NO GRABABA".
+- algo cambia cada 1-2 s: cortes con glitch, golpes con onda expansiva, confeti, emojis que saltan.
+- zoom que late con el beat, barra de progreso arriba, subtítulos gigantes palabra por palabra
+  (exactos con la voz) con las palabras clave en color.
+- final que vuelve al principio (loop): la gente lo mira dos veces.
 """
 import argparse
+import asyncio
 import math
 import os
 import random
@@ -16,11 +21,12 @@ import subprocess
 import wave
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageFilter, ImageFont
+from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(ROOT)
 W, H, FPS, SR = 1080, 1920, 30, 48000
+BPM = 128
 
 ORANGE = (255, 138, 0)
 PINK = (255, 46, 110)
@@ -28,191 +34,244 @@ RED = (240, 52, 72)
 GREEN = (46, 214, 120)
 WHITE = (255, 255, 255)
 MUTED = (170, 165, 195)
-BG1 = (15, 14, 21)
-BG2 = (34, 16, 44)
 YELLOW = (255, 214, 0)
+BLUE = (64, 150, 255)
+BG1 = (12, 11, 18)
+BG2 = (36, 14, 46)
 
 BLACK_F = os.path.join(ROOT, "fonts", "InterDisplay-Black.otf")
 BOLD_F = os.path.join(ROOT, "fonts", "InterDisplay-Bold.otf")
+EMOJI_F = "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf"
 _fonts = {}
+_emoji = {}
 
 
 def font(size, black=True):
     k = (size, black)
     if k not in _fonts:
-        _fonts[k] = ImageFont.truetype(BLACK_F if black else BOLD_F, size)
+        _fonts[k] = ImageFont.truetype(BLACK_F if black else BOLD_F, max(4, size))
     return _fonts[k]
 
 
-# (texto que dice la voz, subtítulo en pantalla, escena)
-# La voz lee la pronunciación ("efe nueve"); el subtítulo muestra cómo se escribe ("F9").
+def emoji(ch, size):
+    """Emoji a color (Noto). Se dibuja una vez a 109 px y se escala."""
+    if not os.path.exists(EMOJI_F):
+        return None
+    if ch not in _emoji:
+        f = ImageFont.truetype(EMOJI_F, 109)
+        im = Image.new("RGBA", (160, 160), (0, 0, 0, 0))
+        ImageDraw.Draw(im).text((10, 10), ch, font=f, embedded_color=True)
+        _emoji[ch] = im.crop(im.getbbox() or (0, 0, 160, 160))
+    e = _emoji[ch]
+    s = max(1, int(size))
+    return e.resize((s, int(s * e.height / e.width)), Image.LANCZOS)
+
+
+# (lo que dice la voz, escena). La voz lee el texto tal cual (la voz neural pronuncia bien "F9", "FPS").
 SCRIPT = [
-    ("¿Hiciste la jugada de tu vida... y no estabas grabando?", "¿Hiciste la jugada de tu vida... y NO estabas grabando?", "hook"),
-    ("Con Jugadón, apretás efe nueve y se guardan los últimos treinta segundos.", "Con Jugadón apretás F9 y se guardan los últimos 30 segundos", "f9"),
-    ("Lo comprime tu placa de video, así el juego no pierde efe pe ese.", "Lo comprime tu placa de video: el juego no pierde FPS", "gpu"),
-    ("Y en reposo no consume casi nada. Está hecho en Rost.", "En reposo no consume casi nada. Hecho en Rust", "light"),
-    ("Todos tus clips quedan ordenados, listos para compartir.", "Todos tus clips ordenados, listos para compartir", "gallery"),
-    ("Los recortás mientras los ves, y con un toque copiás un link que abre cualquiera.", "Recortalos mientras los ves y copiá un link que abre cualquiera", "features"),
-    ("Con efe ocho grabás la pantalla, o una sola ventana.", "Con F8 grabás la pantalla o una sola ventana", "f8"),
-    ("Es gratis. Sin cuentas, y sin publicidad.", "Gratis. Sin cuentas y sin publicidad", "free"),
-    ("Bajalo ya. El link está en la bio.", "Bajalo ya: link en la bio", "cta"),
+    ("¡Pará! ¿Hiciste la jugada de tu vida… y no la grabaste?", "hook"),
+    ("Esto se arregla con una sola tecla.", "fix"),
+    ("Apretás F9 y se guardan los últimos treinta segundos.", "f9"),
+    ("¿Y los FPS? Ni se enteran: lo hace tu placa de video.", "gpu"),
+    ("Pesa menos que una foto: ciento ocho kilobytes.", "light"),
+    ("Tocás el clip y lo recortás ahí mismo…", "edit"),
+    ("…y copiás un link que abre cualquiera.", "link"),
+    ("Gratis. Sin cuentas. Sin vueltas.", "free"),
+    ("Bajalo ya: el link está en la bio.", "cta"),
 ]
+# palabras que van en color y más grandes en los subtítulos
+KEYWORDS = {"pará", "jugada", "grabaste", "tecla", "f9", "treinta", "fps", "placa", "foto", "kilobytes", "recortás", "link", "gratis", "cuentas", "vueltas", "bio", "ya"}
 
 
 # ---------------------------------------------------------------- voz
 
-def synth_voice(args):
-    """Devuelve una lista de arrays float32 a 48 kHz (uno por línea) o None si no hay voz."""
-    if not args.voice:
-        return None
-    out = []
-    os.makedirs(args.tmp, exist_ok=True)
-    for i, (say, _, _) in enumerate(SCRIPT):
-        path = os.path.join(args.tmp, f"voz_{i}.wav")
-        cmd = [args.piper, "--model", args.voice, "--output_file", path, "--length_scale", "0.9", "--sentence_silence", "0.05"]
-        subprocess.run(cmd, input=say.encode("utf-8"), check=True)
-        with wave.open(path) as w:
-            sr, n = w.getframerate(), w.getnframes()
-            a = np.frombuffer(w.readframes(n), dtype=np.int16).astype(np.float32) / 32768.0
-        # a 48 kHz y sin silencios en las puntas
+def wav_to_array(path):
+    with wave.open(path) as w:
+        sr, n, ch = w.getframerate(), w.getnframes(), w.getnchannels()
+        a = np.frombuffer(w.readframes(n), dtype=np.int16).astype(np.float32) / 32768.0
+    if ch > 1:
+        a = a.reshape(-1, ch).mean(axis=1)
+    if sr != SR:
         a = np.interp(np.arange(0, len(a), sr / SR), np.arange(len(a)), a).astype(np.float32)
-        nz = np.where(np.abs(a) > 0.01)[0]
-        if len(nz):
-            a = a[max(0, nz[0] - 800): nz[-1] + 2400]
-        out.append(a)
+    return a
+
+
+async def _edge(text, voice, rate, pitch, mp3):
+    import edge_tts
+    words = []
+    c = edge_tts.Communicate(text, voice, rate=rate, pitch=pitch, boundary="WordBoundary")
+    with open(mp3, "wb") as f:
+        async for ch in c.stream():
+            if ch["type"] == "audio":
+                f.write(ch["data"])
+            elif ch["type"] == "WordBoundary":
+                words.append((ch["offset"] / 1e7, ch["text"]))
+    return words
+
+
+def synth_voice(args):
+    """Lista de (audio float32 48 kHz, [(segundo, palabra)]) por línea, o None (sin voz, para probar)."""
+    if args.no_voice:
+        return None
+    os.makedirs(args.tmp, exist_ok=True)
+    out = []
+    for i, (say, _) in enumerate(SCRIPT):
+        wav = os.path.join(args.tmp, f"voz_{i}.wav")
+        words = None
+        try:
+            mp3 = os.path.join(args.tmp, f"voz_{i}.mp3")
+            words = asyncio.run(_edge(say, args.edge_voice, args.rate, args.pitch, mp3))
+            subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", mp3, "-ac", "1", "-ar", str(SR), wav], check=True)
+        except Exception as e:  # sin internet o servicio caído: Piper (más robótica, pero anda offline)
+            if not args.voice:
+                raise
+            print("edge-tts no anduvo, uso Piper:", e)
+            subprocess.run([args.piper, "--model", args.voice, "--output_file", wav, "--length_scale", "0.85"], input=say.encode(), check=True)
+            words = None
+        a = wav_to_array(wav)
+        # recortar silencios de las puntas (y correr los tiempos de las palabras)
+        nz = np.where(np.abs(a) > 0.015)[0]
+        cut0 = max(0, nz[0] - 600) if len(nz) else 0
+        cut1 = nz[-1] + 2000 if len(nz) else len(a)
+        a = a[cut0:cut1]
+        if not words:
+            ws = say.split()
+            wt = [len(x) + 2 for x in ws]
+            span = len(a) / SR
+            acc, words = 0, []
+            for x, k in zip(ws, wt):
+                words.append((span * acc / sum(wt), x))
+                acc += k
+        else:
+            words = [(max(0.0, t - cut0 / SR), w) for t, w in words]
+        out.append((a, words))
     return out
 
 
-# ---------------------------------------------------------------- audio: música y efectos
+# ---------------------------------------------------------------- audio
 
 def env_exp(n, k):
     return np.exp(-np.arange(n) / SR * k).astype(np.float32)
-
-
-def kick():
-    n = int(SR * 0.35)
-    t = np.arange(n) / SR
-    f = 50 + 110 * np.exp(-t * 30)
-    ph = np.cumsum(2 * np.pi * f / SR)
-    return (np.sin(ph) * env_exp(n, 9)).astype(np.float32)
 
 
 def noise(n, seed=0):
     return np.random.default_rng(seed).uniform(-1, 1, n).astype(np.float32)
 
 
-def hat():
-    n = int(SR * 0.05)
-    x = noise(n, 1)
-    x = np.diff(x, prepend=0)  # agudo
-    return x * env_exp(n, 70) * 0.35
+def sweep(f0, f1, dur, curve=30):
+    n = int(SR * dur)
+    t = np.arange(n) / SR
+    f = f1 + (f0 - f1) * np.exp(-t * curve)
+    return np.sin(np.cumsum(2 * np.pi * f / SR)).astype(np.float32)
+
+
+def kick():
+    n = int(SR * 0.32)
+    return sweep(170, 48, 0.32) * env_exp(n, 9)
+
+
+def hat(seed=1):
+    n = int(SR * 0.045)
+    return np.diff(noise(n, seed), prepend=0) * env_exp(n, 75) * 0.32
 
 
 def clap():
-    n = int(SR * 0.2)
+    n = int(SR * 0.22)
     x = noise(n, 2)
-    x = x - np.convolve(x, np.ones(8) / 8, mode="same")
-    return x * env_exp(n, 22) * 0.55
+    x = x - np.convolve(x, np.ones(10) / 10, mode="same")
+    return x * env_exp(n, 20) * 0.6
 
 
-def tone(freq, dur, kind="saw", vol=1.0):
-    n = int(SR * dur)
-    t = np.arange(n) / SR
-    if kind == "sin":
-        x = np.sin(2 * np.pi * freq * t)
-    else:
-        x = 2 * ((t * freq) % 1) - 1
-    return (x * vol).astype(np.float32)
-
-
-def lowpass(x, a):
-    y = np.empty_like(x)
-    acc = 0.0
-    for i in range(len(x)):  # simple, alcanza para unos segundos de audio
-        acc += a * (x[i] - acc)
-        y[i] = acc
-    return y
+def onepole(x, a):
+    # filtro pasabajos rápido (vectorizado por bloques no hace falta: es poco audio)
+    from itertools import accumulate
+    return np.fromiter(accumulate(x, lambda acc, v: acc + a * (v - acc)), dtype=np.float32, count=len(x))
 
 
 def add(buf, x, at, vol=1.0):
     i = int(at * SR)
-    if i >= len(buf):
+    if i < 0:
+        x = x[-i:]
+        i = 0
+    if i >= len(buf) or len(x) == 0:
         return
     j = min(len(buf), i + len(x))
     buf[i:j] += x[: j - i] * vol
 
 
-def whoosh():
-    n = int(SR * 0.4)
-    x = noise(n, 3)
+def whoosh(dur=0.35):
+    n = int(SR * dur)
     t = np.arange(n) / n
-    a = 0.02 + 0.5 * t  # se abre el filtro
-    y = np.empty_like(x)
-    acc = 0.0
-    for i in range(n):
-        acc += a[i] * (x[i] - acc)
-        y[i] = acc
-    return y * np.sin(np.pi * t) * 0.6
+    y = onepole(noise(n, 3), 0.15) * np.sin(np.pi * t) ** 2
+    return y * 1.4
 
 
 def riser(dur):
     n = int(SR * dur)
     t = np.arange(n) / SR
-    f = 200 * (6 ** (t / dur))
-    ph = np.cumsum(2 * np.pi * f / SR)
-    return (np.sin(ph) * 0.15 + noise(n, 4) * 0.08 * (t / dur)) * (t / dur)
-
-
-def ding():
-    # el mismo "tin-tin" que hace la app al guardar
-    a = tone(880, 0.07, "sin") * env_exp(int(SR * 0.07), 8)
-    b = tone(1318.5, 0.22, "sin") * env_exp(int(SR * 0.22), 9)
-    return np.concatenate([a, b]) * 0.5
-
-
-def keyclick():
-    n = int(SR * 0.04)
-    return noise(n, 5) * env_exp(n, 120) * 0.6
+    f = 180 * (8 ** (t / dur))
+    x = np.sin(np.cumsum(2 * np.pi * f / SR)) * 0.12 + onepole(noise(n, 4), 0.3) * 0.25 * (t / dur)
+    return (x * (t / dur) ** 1.5).astype(np.float32)
 
 
 def boom():
-    n = int(SR * 1.2)
+    n = int(SR * 1.3)
+    return sweep(120, 34, 1.3, 5) * env_exp(n, 2.4) * 0.95
+
+
+def scratch():
+    """Freno de disco: barrido que baja rápido."""
+    n = int(SR * 0.45)
     t = np.arange(n) / SR
-    f = 40 + 60 * np.exp(-t * 6)
-    ph = np.cumsum(2 * np.pi * f / SR)
-    return np.sin(ph) * env_exp(n, 2.5) * 0.9
+    f = 900 * np.exp(-t * 7) + 60
+    x = np.sign(np.sin(np.cumsum(2 * np.pi * f / SR))) * 0.3 + noise(n, 7) * 0.2
+    return onepole(x.astype(np.float32), 0.25) * env_exp(n, 4) * 1.2
 
 
-def music(total, drop_at, bpm=124):
-    """Beat electrónico simple: arranca suave (gancho), cae fuerte en el drop."""
+def ding():
+    a = np.sin(2 * np.pi * 880 * np.arange(int(SR * 0.07)) / SR) * env_exp(int(SR * 0.07), 8)
+    b = np.sin(2 * np.pi * 1318.5 * np.arange(int(SR * 0.25)) / SR) * env_exp(int(SR * 0.25), 9)
+    return np.concatenate([a, b]).astype(np.float32) * 0.55
+
+
+def pop():
+    n = int(SR * 0.08)
+    return sweep(300, 900, 0.08, 40) * env_exp(n, 40) * 0.5
+
+
+def click():
+    n = int(SR * 0.03)
+    return noise(n, 5) * env_exp(n, 140) * 0.7
+
+
+def music(total, drop_at, beat):
+    """Beat electrónico de 128 BPM con 'bombeo' (sidechain): tenso en el gancho, explota en el drop."""
     buf = np.zeros(int(total * SR) + SR, dtype=np.float32)
-    beat = 60 / bpm
-    k, h, c = kick(), hat(), clap()
-    # bajo: La menor, Fa, Do, Sol (dos compases cada uno)
+    bass = np.zeros_like(buf)
+    k, c = kick(), clap()
     roots = [55.0, 43.65, 65.41, 49.0]
-    t = 0.0
-    i = 0
+    t, i = 0.0, 0
     while t < total:
-        after = t >= drop_at
-        bar_pos = i % 4
-        if after:
-            add(buf, k, t, 0.9)
-            if bar_pos in (1, 3):
-                add(buf, c, t, 0.6)
+        if t >= drop_at:
+            add(buf, k, t, 0.95)
+            if i % 2 == 1:
+                add(buf, c, t, 0.55)
+            add(buf, hat(i), t + beat / 2, 1.0)
+            add(buf, hat(i + 99), t + beat * 0.75, 0.5)
             root = roots[(i // 8) % 4]
-            b = tone(root, beat * 0.9) * env_exp(int(SR * beat * 0.9), 3)
-            add(buf, b, t, 0.25)
-            add(buf, h, t + beat / 2, 1.0)
+            n = int(SR * beat)
+            tt = np.arange(n) / SR
+            saw = (2 * ((tt * root * 2) % 1) - 1) * 0.6 + np.sin(2 * np.pi * root * tt)
+            # bombeo: el bajo sube después de cada bombo
+            pump = 1 - np.exp(-tt * 14)
+            add(bass, (saw * pump).astype(np.float32), t, 0.28)
         else:
-            # gancho: solo un pad tenso
-            if bar_pos == 0:
-                pad = tone(110, beat * 4, "sin") * 0.12 + tone(164.8, beat * 4, "sin") * 0.08
-                add(buf, pad, t, 1.0)
+            # gancho: pulso grave tenso
+            add(buf, np.sin(2 * np.pi * 55 * np.arange(int(SR * beat)) / SR).astype(np.float32) * env_exp(int(SR * beat), 6), t, 0.35)
         t += beat
         i += 1
-    # suavizar el bajo/saw
-    buf = lowpass(buf, 0.35)
-    return buf[: int(total * SR)]
+    bass = onepole(bass, 0.12)
+    return (buf + bass)[: int(total * SR)]
 
 
 # ---------------------------------------------------------------- dibujo
@@ -224,290 +283,431 @@ def ease_out(x):
 
 def ease_back(x):
     x = max(0.0, min(1.0, x))
-    c = 1.7
+    c = 2.2
     return 1 + (c + 1) * (x - 1) ** 3 + c * (x - 1) ** 2
 
 
 def gradient_bg():
-    y = np.linspace(0, 1, H)[:, None]
-    top = np.array(BG1, dtype=np.float32)
-    bot = np.array(BG2, dtype=np.float32)
-    g = top * (1 - y[..., None]) + bot * y[..., None]
-    g = np.repeat(g, W, axis=1)
-    return Image.fromarray(g.astype(np.uint8), "RGB")
+    y = np.linspace(0, 1, H)[:, None, None]
+    g = np.array(BG1, np.float32) * (1 - y) + np.array(BG2, np.float32) * y
+    return Image.fromarray(np.repeat(g, W, axis=1).astype(np.uint8), "RGB")
 
 
 def glow(color, r):
     s = r * 2
     im = Image.new("RGBA", (s, s), color + (0,))
-    d = ImageDraw.Draw(im)
-    d.ellipse((r // 2, r // 2, s - r // 2, s - r // 2), fill=color + (150,))
+    ImageDraw.Draw(im).ellipse((r // 2, r // 2, s - r // 2, s - r // 2), fill=color + (150,))
     return im.filter(ImageFilter.GaussianBlur(r // 3))
 
 
-BG = None
-GLOWS = None
+BG = GLOWS = None
 
 
-def background(t, tint=None):
+def background(t, hue_shift=0):
     im = BG.copy()
-    for k, (g, ox, oy, sp) in enumerate(GLOWS):
-        x = int(W / 2 + math.sin(t * sp + k * 2) * 380 - g.width / 2 + ox)
-        y = int(H / 2 + math.cos(t * sp * 0.8 + k) * 600 - g.height / 2 + oy)
+    for k, (g, sp) in enumerate(GLOWS):
+        x = int(W / 2 + math.sin(t * sp + k * 2.1 + hue_shift) * 420 - g.width / 2)
+        y = int(H / 2 + math.cos(t * sp * 0.7 + k * 1.3) * 700 - g.height / 2)
         im.paste(g, (x, y), g)
-    if tint:
-        ov = Image.new("RGB", (W, H), tint[0])
-        im = Image.blend(im, ov, tint[1])
     return im
 
 
-def text_center(d, y, s, size, fill=WHITE, black=True, stroke=0, stroke_fill=(0, 0, 0)):
+def tc(d, y, s, size, fill=WHITE, black=True, stroke=0):
     f = font(size, black)
     w = d.textlength(s, font=f)
-    d.text(((W - w) / 2, y), s, font=f, fill=fill, stroke_width=stroke, stroke_fill=stroke_fill)
-    return w
+    d.text(((W - w) / 2, y), s, font=f, fill=fill, stroke_width=stroke, stroke_fill=(0, 0, 0))
 
 
 def rounded(d, box, r, fill, outline=None, width=0):
     d.rounded_rectangle(box, r, fill=fill, outline=outline, width=width)
 
 
-def gradient_text(img, y, s, size, c1=ORANGE, c2=PINK):
-    """Texto con degradé naranja→rosa (el color de la marca)."""
+def grad_text(img, y, s, size, c1=ORANGE, c2=PINK, x=None):
     f = font(size)
-    tmp = ImageDraw.Draw(img)
-    w = int(tmp.textlength(s, font=f))
-    bbox = f.getbbox(s)
-    h = bbox[3] + 10
-    mask = Image.new("L", (w + 20, h + 20), 0)
-    ImageDraw.Draw(mask).text((10, 10), s, font=f, fill=255)
-    grad = np.zeros((h + 20, w + 20, 3), dtype=np.uint8)
-    xs = np.linspace(0, 1, w + 20)[None, :, None]
-    grad[:] = (np.array(c1) * (1 - xs) + np.array(c2) * xs).astype(np.uint8)
-    gi = Image.fromarray(grad, "RGB")
-    shadow = mask.filter(ImageFilter.GaussianBlur(14))
-    x = (W - w - 20) // 2
-    img.paste((0, 0, 0), (x, int(y) + 8), shadow)
-    img.paste(gi, (x, int(y)), mask)
+    w = int(ImageDraw.Draw(img).textlength(s, font=f))
+    h = f.getbbox(s)[3] + 20
+    mask = Image.new("L", (w + 40, h + 20), 0)
+    ImageDraw.Draw(mask).text((20, 10), s, font=f, fill=255)
+    xs = np.linspace(0, 1, w + 40)[None, :, None]
+    grad = (np.array(c1) * (1 - xs) + np.array(c2) * xs).astype(np.uint8)
+    gi = Image.fromarray(np.repeat(grad, h + 20, axis=0), "RGB")
+    x0 = (W - w - 40) // 2 if x is None else x
+    img.paste((0, 0, 0), (x0 + 6, int(y) + 10), mask.filter(ImageFilter.GaussianBlur(10)))
+    img.paste(gi, (x0, int(y)), mask)
 
 
-def keycap(img, cx, cy, label, pressed, size=300, color=ORANGE):
+def paste_center(img, sub, cx, cy, scale=1.0, rot=0.0):
+    if sub is None or scale <= 0.01:
+        return
+    s = sub.resize((max(1, int(sub.width * scale)), max(1, int(sub.height * scale))), Image.LANCZOS)
+    if rot:
+        s = s.rotate(rot, expand=True, resample=Image.BICUBIC)
+    img.paste(s, (int(cx - s.width / 2), int(cy - s.height / 2)), s)
+
+
+def sticker(img, ch, cx, cy, t0, t, size=170, rot=0):
+    """Emoji que aparece con rebote."""
+    if t < t0:
+        return
+    k = ease_back((t - t0) / 0.25)
+    wob = math.sin((t - t0) * 9) * 6 * math.exp(-(t - t0) * 2)
+    paste_center(img, emoji(ch, size), cx, cy, k, rot + wob)
+
+
+def keycap(img, cx, cy, label, press, size=320, color=ORANGE):
     d = ImageDraw.Draw(img)
-    off = 26 if pressed else 0
+    off = int(28 * press)
     x0, y0 = cx - size // 2, cy - size // 2
-    rounded(d, (x0, y0 + 40, x0 + size, y0 + size + 40), 48, (60, 30, 20))
-    rounded(d, (x0, y0 + off, x0 + size, y0 + size + off), 48, color)
-    rounded(d, (x0 + 22, y0 + 18 + off, x0 + size - 22, y0 + size - 50 + off), 36, tuple(min(255, c + 30) for c in color))
+    rounded(d, (x0, y0 + 44, x0 + size, y0 + size + 44), 52, tuple(int(c * 0.35) for c in color))
+    rounded(d, (x0, y0 + off, x0 + size, y0 + size + off), 52, color)
+    rounded(d, (x0 + 24, y0 + 20 + off, x0 + size - 24, y0 + size - 54 + off), 40, tuple(min(255, c + 35) for c in color))
     f = font(int(size * 0.42))
     w = d.textlength(label, font=f)
-    d.text((cx - w / 2, y0 + size * 0.22 + off), label, font=f, fill=WHITE)
+    d.text((cx - w / 2, y0 + size * 0.2 + off), label, font=f, fill=WHITE)
 
 
-def toast(img, y, title, sub, icon):
+def toast(img, y, title, sub, icon, accent=GREEN):
     d = ImageDraw.Draw(img)
-    x0, x1 = 90, W - 90
-    sh = Image.new("RGBA", (x1 - x0 + 80, 260), (0, 0, 0, 0))
-    ImageDraw.Draw(sh).rounded_rectangle((40, 40, x1 - x0 + 40, 220), 40, fill=(0, 0, 0, 160))
-    sh = sh.filter(ImageFilter.GaussianBlur(18))
-    img.paste(sh, (x0 - 40, int(y) - 30), sh)
-    rounded(d, (x0, y, x1, y + 180), 40, (36, 32, 50), outline=(80, 70, 110), width=3)
-    ic = icon.resize((110, 110), Image.LANCZOS)
-    img.paste(ic, (x0 + 34, int(y) + 35), ic)
-    d.text((x0 + 170, y + 34), title, font=font(52), fill=WHITE)
-    d.text((x0 + 172, y + 100), sub, font=font(38, False), fill=MUTED)
-    # tilde verde
-    cx, cy = x1 - 90, y + 90
-    d.ellipse((cx - 44, cy - 44, cx + 44, cy + 44), fill=GREEN)
-    d.line((cx - 20, cy + 2, cx - 4, cy + 18, cx + 22, cy - 16), fill=WHITE, width=12, joint="curve")
+    x0, x1 = 80, W - 80
+    sh = Image.new("RGBA", (x1 - x0 + 80, 280), (0, 0, 0, 0))
+    ImageDraw.Draw(sh).rounded_rectangle((40, 40, x1 - x0 + 40, 230), 44, fill=(0, 0, 0, 170))
+    img.paste(sh.filter(ImageFilter.GaussianBlur(18)), (x0 - 40, int(y) - 26), sh.filter(ImageFilter.GaussianBlur(18)))
+    rounded(d, (x0, y, x1, y + 190), 44, (38, 33, 54), outline=(90, 80, 125), width=3)
+    ic = icon.resize((116, 116), Image.LANCZOS)
+    img.paste(ic, (x0 + 34, int(y) + 37), ic)
+    d.text((x0 + 176, y + 36), title, font=font(56), fill=WHITE)
+    d.text((x0 + 178, y + 106), sub, font=font(38, False), fill=MUTED)
+    cx, cy = x1 - 92, y + 95
+    d.ellipse((cx - 46, cy - 46, cx + 46, cy + 46), fill=accent)
+    d.line((cx - 21, cy + 2, cx - 4, cy + 19, cx + 23, cy - 17), fill=WHITE, width=12, joint="curve")
 
 
-def chip(d, cx, y, s, size=44, fill=(44, 38, 62), color=WHITE):
+def chip(d, cx, y, s, size=46, fill=(44, 38, 62), color=WHITE):
     f = font(size, False)
     w = d.textlength(s, font=f)
-    rounded(d, (cx - w / 2 - 34, y, cx + w / 2 + 34, y + size + 40), (size + 40) // 2, fill)
-    d.text((cx - w / 2, y + 16), s, font=f, fill=color)
+    rounded(d, (cx - w / 2 - 36, y, cx + w / 2 + 36, y + size + 42), (size + 42) // 2, fill)
+    d.text((cx - w / 2, y + 17), s, font=f, fill=color)
 
 
-# ---------------------------------------------------------------- escenas (t = segundos desde que empezó, p = 0..1)
+# ---------------------------------------------------------------- efectos de pantalla
 
-def sc_hook(img, t, p):
-    d = ImageDraw.Draw(img)
-    # mira de un juego
-    cx, cy = W // 2, 640
-    r = 150 + 10 * math.sin(t * 6)
-    d.ellipse((cx - r, cy - r, cx + r, cy + r), outline=(255, 255, 255, 180), width=8)
-    for a, b in [((cx - r - 70, cy), (cx - r + 50, cy)), ((cx + r - 50, cy), (cx + r + 70, cy)), ((cx, cy - r - 70), (cx, cy - r + 50)), ((cx, cy + r - 50), (cx, cy + r + 70))]:
-        d.line((a, b), fill=WHITE, width=10)
-    d.ellipse((cx - 14, cy - 14, cx + 14, cy + 14), fill=RED)
-    s = ease_back(t / 0.35)
-    if s > 0:
-        text_center(d, 920, "LA JUGADA", int(120 * min(s, 1.15)), stroke=8)
-        text_center(d, 1060, "DE TU VIDA", int(120 * min(ease_back((t - 0.15) / 0.35), 1.15)) if t > 0.15 else 1, stroke=8)
-    if p > 0.55:
-        k = ease_back((p - 0.55) / 0.12)
-        # sello rojo "NO GRABABA" torcido
-        stamp = Image.new("RGBA", (900, 260), (0, 0, 0, 0))
-        sd = ImageDraw.Draw(stamp)
-        sd.rounded_rectangle((10, 10, 890, 250), 30, outline=RED + (255,), width=16)
-        f = font(130)
-        w = sd.textlength("NO GRABABA", font=f)
-        sd.text(((900 - w) / 2, 50), "NO GRABABA", font=f, fill=RED + (255,))
-        sz = max(1, int(900 * (2.2 - 1.2 * k)))
-        stamp = stamp.resize((sz, int(sz * 260 / 900))).rotate(-8, expand=True, resample=Image.BICUBIC)
-        img.paste(stamp, ((W - stamp.width) // 2, 1240 - stamp.height // 2 + 130), stamp)
+class FX:
+    """Golpes (temblor + onda expansiva), confeti y destellos, todos con su momento."""
 
+    def __init__(self):
+        self.impacts = []  # (t, fuerza, cx, cy)
+        self.bursts = []  # (t, cx, cy, partículas)
 
-def sc_f9(img, t, p, icon):
-    keycap(img, W // 2, 760, "F9", 0.35 < t < 0.65)
-    if t > 0.55:
-        y = 260 - 420 * (1 - ease_out((t - 0.55) / 0.35))
-        toast(img, y, "Clip guardado", "los últimos 30 segundos", icon)
-    if t > 0.7:
+    def impact(self, t, strength=1.0, cx=W // 2, cy=H // 2):
+        self.impacts.append((t, strength, cx, cy))
+
+    def confetti(self, t, cx, cy, n=70, seed=0):
+        rng = random.Random(seed)
+        parts = []
+        for _ in range(n):
+            a = rng.uniform(0, 2 * math.pi)
+            v = rng.uniform(900, 2200)
+            parts.append((math.cos(a) * v, math.sin(a) * v - 900, rng.choice([ORANGE, PINK, YELLOW, BLUE, GREEN, WHITE]), rng.uniform(14, 30), rng.uniform(0, 6)))
+        self.bursts.append((t, cx, cy, parts))
+
+    def shake(self, t):
+        dx = dy = 0.0
+        for t0, s, _, _ in self.impacts:
+            dt = t - t0
+            if 0 <= dt < 0.4:
+                a = 34 * s * math.exp(-dt * 10)
+                dx += a * math.sin(dt * 90)
+                dy += a * math.cos(dt * 77)
+        return int(dx), int(dy)
+
+    def draw(self, img, t):
         d = ImageDraw.Draw(img)
-        # barra de "últimos 30 s" llenándose
-        k = ease_out((t - 0.7) / 0.9)
-        rounded(d, (140, 1120, W - 140, 1170), 25, (44, 38, 62))
-        x1 = 140 + (W - 280) * k
-        if x1 > 190:
-            rounded(d, (140, 1120, x1, 1170), 25, ORANGE)
-        text_center(d, 1190, "-30 s  →  ahora", 46, MUTED, black=False)
+        for t0, s, cx, cy in self.impacts:
+            dt = t - t0
+            if 0 <= dt < 0.45:
+                r = 80 + dt * 2600 * s
+                wd = max(2, int(26 * (1 - dt / 0.45)))
+                d.ellipse((cx - r, cy - r, cx + r, cy + r), outline=WHITE, width=wd)
+        for t0, cx, cy, parts in self.bursts:
+            dt = t - t0
+            if 0 <= dt < 1.6:
+                for vx, vy, col, sz, spin in parts:
+                    x = cx + vx * dt * 0.6
+                    y = cy + vy * dt * 0.6 + 1300 * dt * dt
+                    if 0 <= x < W and 0 <= y < H:
+                        a = spin + dt * 10
+                        w_ = sz * abs(math.cos(a))
+                        d.rectangle((x - w_ / 2, y - sz / 2, x + w_ / 2 + 2, y + sz / 2), fill=col)
 
 
-def sc_gpu(img, t, p):
+def glitch(img, amount, seed):
+    """Corte con glitch: canales corridos y franjas desplazadas."""
+    rng = random.Random(seed)
+    r, g, b = img.split()
+    off = int(30 * amount)
+    r = ImageChops.offset(r, -off, 0)
+    b = ImageChops.offset(b, off, 0)
+    out = Image.merge("RGB", (r, g, b))
+    for _ in range(int(8 * amount)):
+        y = rng.randint(0, H - 80)
+        h = rng.randint(20, 120)
+        dx = rng.randint(-120, 120)
+        band = out.crop((0, y, W, y + h))
+        out.paste(ImageChops.offset(band, dx, 0), (0, y))
+    return out
+
+
+# ---------------------------------------------------------------- escenas
+
+def sc_hook(img, t, dur, ctx):
     d = ImageDraw.Draw(img)
-    # contador de FPS que no baja
-    fps = 144 if t > 0.3 else int(144 * ease_out(t / 0.3))
-    gradient_text(img, 380, f"{fps}", 330, GREEN, (120, 255, 190))
-    text_center(d, 720, "FPS", 120, GREEN)
-    # gráfico plano
-    pts = []
-    for i in range(40):
-        x = 140 + i * (W - 280) / 39
-        y = 1010 + math.sin(i * 1.7 + t * 4) * 6
-        pts.append((x, y))
-    k = int(len(pts) * ease_out(t / 0.8))
-    if k > 1:
-        d.line(pts[:k], fill=GREEN, width=10, joint="curve")
-    chip(d, W // 2, 1110, "el video lo comprime la placa", 46)
-    if t > 0.6:
-        chip(d, W // 2, 1230, "GPU ✓   ·   procesador libre", 46, fill=(30, 70, 50), color=(170, 255, 200))
+    freeze = dur * 0.58
+    tt = min(t, freeze)
+    # kill feed de un ACE que se va armando
+    names = ["xXSniperXx", "Pepe_99", "ElTanque", "NoobMaster", "ElUltimo"]
+    for i, n in enumerate(names):
+        t0 = 0.12 + i * 0.22
+        if tt < t0:
+            continue
+        k = ease_out((tt - t0) / 0.15)
+        y = 300 + i * 112
+        x1 = W - 70
+        x0 = x1 - 760 + int(300 * (1 - k))
+        rounded(d, (x0, y, x1, y + 92), 18, (20, 18, 28), outline=RED if i == len(names) - 1 else (70, 60, 90), width=4)
+        d.text((x0 + 28, y + 20), "VOS", font=font(46), fill=ORANGE)
+        # mira
+        cx, cy = x0 + 190, y + 46
+        d.ellipse((cx - 22, cy - 22, cx + 22, cy + 22), outline=WHITE, width=5)
+        d.line((cx - 34, cy, cx + 34, cy), fill=WHITE, width=5)
+        d.line((cx, cy - 34, cx, cy + 34), fill=WHITE, width=5)
+        paste_center(img, emoji("💀", 54), cx + 76, cy)
+        d.text((cx + 120, y + 22), n, font=font(44, False), fill=WHITE)
+    kills = sum(1 for i in range(5) if tt >= 0.12 + i * 0.22)
+    if kills:
+        s = ease_back((tt - (0.12 + (kills - 1) * 0.22)) / 0.2)
+        label = "ACE!" if kills == 5 else f"x{kills}"
+        f = int(220 * min(1.15, s))
+        grad_text(img, 940, label, f, YELLOW, ORANGE)
+    if t >= freeze:
+        # se congela: blanco y negro, sello rojo y llanto
+        g = img.convert("L").convert("RGB")
+        img.paste(Image.blend(g, Image.new("RGB", (W, H), (60, 0, 10)), 0.35))
+        k = ease_back((t - freeze) / 0.18)
+        stamp = Image.new("RGBA", (940, 270), (0, 0, 0, 0))
+        sd = ImageDraw.Draw(stamp)
+        sd.rounded_rectangle((10, 10, 930, 260), 30, outline=RED + (255,), width=18)
+        f = font(138)
+        w = sd.textlength("NO GRABABA", font=f)
+        sd.text(((940 - w) / 2, 50), "NO GRABABA", font=f, fill=RED + (255,))
+        paste_center(img, stamp, W / 2, 1120, 2.4 - 1.4 * k, -9)
+        sticker(img, "😭", W - 200, 1360, freeze + 0.15, t, 210, 10)
 
 
-def sc_light(img, t, p):
+def sc_fix(img, t, dur, ctx):
     d = ImageDraw.Draw(img)
+    # la tecla cae desde arriba y golpea
+    land = 0.32
+    y = -400 + (980 + 400) * ease_out(t / land) if t < land else 980
+    keycap(img, W // 2, int(y), "F9", 1.0 if land <= t < land + 0.12 else 0.0, size=420)
+    if t > land:
+        s = ease_back((t - land) / 0.25)
+        tc(d, 1290, "1 TECLA", int(150 * min(1.1, s)), YELLOW, stroke=10)
+    sticker(img, "⚡", 230, 640, land + 0.1, t, 190, -12)
+    sticker(img, "🎮", W - 230, 700, land + 0.25, t, 190, 12)
+
+
+def sc_f9(img, t, dur, ctx):
+    d = ImageDraw.Draw(img)
+    # rebobinado: reloj que vuelve 30 s
     k = ease_out(t / 0.7)
-    gradient_text(img, 420, f"{int(108 * k)} KB", 230)
-    text_center(d, 720, "de RAM en reposo", 70, WHITE, black=False)
-    if t > 0.5:
-        s = ease_back((t - 0.5) / 0.3)
-        f = int(90 * max(0.01, s))
-        rounded(d, (W / 2 - 330, 950, W / 2 + 330, 1110), 80, (52, 34, 30), outline=ORANGE, width=6)
-        text_center(d, 975, "HECHO EN RUST", max(10, int(f * 0.8)), ORANGE)
+    cx, cy, r = W // 2, 760, 230
+    d.ellipse((cx - r, cy - r, cx + r, cy + r), outline=(80, 70, 110), width=16)
+    d.arc((cx - r, cy - r, cx + r, cy + r), -90 - 180 * k, -90, fill=ORANGE, width=16)
+    ang = math.radians(-90 - 180 * k)
+    d.line((cx, cy, cx + math.cos(ang) * (r - 40), cy + math.sin(ang) * (r - 40)), fill=WHITE, width=14)
+    d.ellipse((cx - 18, cy - 18, cx + 18, cy + 18), fill=WHITE)
+    tc(d, 1030, f"-{int(30 * k)} s", 130, ORANGE)
+    if t > 0.75:
+        yy = 230 - 420 * (1 - ease_out((t - 0.75) / 0.3))
+        toast(img, yy, "Clip guardado", "los últimos 30 segundos", ctx["icon"])
+    sticker(img, "🔥", W - 190, 560, 0.9, t, 200, 14)
 
 
-def sc_gallery(img, t, p, shot):
-    # captura real de la ventana, en un marco, con zoom lento
-    z = 1.0 + 0.12 * p
-    sw = int(1000 * z)
+def gauge(img, cx, cy, r, value, vmax, t):
+    d = ImageDraw.Draw(img)
+    d.arc((cx - r, cy - r, cx + r, cy + r), 150, 390, fill=(60, 54, 84), width=40)
+    frac = value / vmax
+    d.arc((cx - r, cy - r, cx + r, cy + r), 150, 150 + 240 * frac, fill=GREEN, width=40)
+    a = math.radians(150 + 240 * frac + math.sin(t * 30) * 0.6)
+    d.line((cx, cy, cx + math.cos(a) * (r - 60), cy + math.sin(a) * (r - 60)), fill=WHITE, width=16)
+    d.ellipse((cx - 26, cy - 26, cx + 26, cy + 26), fill=WHITE)
+
+
+def sc_gpu(img, t, dur, ctx):
+    d = ImageDraw.Draw(img)
+    v = 144 * ease_out(t / 0.5)
+    gauge(img, W // 2, 820, 330, v, 165, t)
+    grad_text(img, 880, f"{int(v)}", 210, GREEN, (150, 255, 200))
+    tc(d, 1110, "FPS", 90, GREEN)
+    if t > 0.6:
+        chip(d, W // 2, 1250, "la graba tu placa de video", 48, fill=(30, 70, 50), color=(170, 255, 200))
+    sticker(img, "😎", W - 200, 420, 0.5, t, 200, 10)
+
+
+def sc_light(img, t, dur, ctx):
+    d = ImageDraw.Draw(img)
+    # carrera de barras: una foto del celular contra Jugadón
+    rows = [("📸", "una foto del celu", "3 MB", 1.0, (110, 100, 140)), ("🎮", "Jugadón en reposo", "108 KB", 0.036, ORANGE)]
+    for i, (e, label, val, frac, col) in enumerate(rows):
+        y = 520 + i * 330
+        t0 = 0.1 + i * 0.45
+        if t < t0:
+            continue
+        k = ease_out((t - t0) / 0.5)
+        paste_center(img, emoji(e, 110), 150, y + 60)
+        d.text((240, y), label, font=font(56), fill=WHITE)
+        bw = max(30, int((W - 340) * frac * k))
+        rounded(d, (240, y + 92, 240 + bw, y + 160), 34, col)
+        d.text((240 + bw + 24 if frac < 0.5 else 270, y + 98), val, font=font(54), fill=WHITE if frac >= 0.5 else ORANGE)
+    if t > 1.1:
+        s = ease_back((t - 1.1) / 0.25)
+        tc(d, 1230, "MENOS QUE UNA FOTO", int(84 * min(1.1, s)), YELLOW, stroke=8)
+        sticker(img, "🤯", W // 2, 1440, 1.25, t, 160)
+
+
+def cursor(img, x, y, down):
+    pts = [(x, y), (x, y + 70), (x + 18, y + 54), (x + 32, y + 84), (x + 46, y + 77), (x + 32, y + 48), (x + 56, y + 48)]
+    d = ImageDraw.Draw(img)
+    d.polygon(pts, fill=WHITE, outline=(0, 0, 0))
+    if down:
+        d.ellipse((x - 40, y - 40, x + 40, y + 40), outline=ORANGE, width=8)
+
+
+def sc_edit(img, t, dur, ctx):
+    shot = ctx["shot"]
+    d = ImageDraw.Draw(img)
+    # la ventana real de la app, el mouse toca un clip y aparece el editor con las manijas
+    sw = 1000
     sh = int(sw * shot.height / shot.width)
     im = shot.resize((sw, sh), Image.LANCZOS)
-    x = (W - sw) // 2
-    y = 520 - int(40 * p)
-    frame = Image.new("RGBA", (sw + 24, sh + 24), (0, 0, 0, 0))
-    ImageDraw.Draw(frame).rounded_rectangle((0, 0, sw + 23, sh + 23), 36, fill=(255, 138, 0, 255))
-    img.paste(frame, (x - 12, y - 12), frame)
+    x, y = (W - sw) // 2, 340
     mask = Image.new("L", (sw, sh), 0)
-    ImageDraw.Draw(mask).rounded_rectangle((0, 0, sw - 1, sh - 1), 28, fill=255)
+    ImageDraw.Draw(mask).rounded_rectangle((0, 0, sw - 1, sh - 1), 30, fill=255)
+    rounded(d, (x - 10, y - 10, x + sw + 10, y + sh + 10), 38, ORANGE)
     img.paste(im, (x, y), mask)
-    d = ImageDraw.Draw(img)
-    text_center(d, 260, "MIS CLIPS", 110, WHITE)
+    # mouse hacia la segunda tarjeta
+    tx, ty = x + int(sw * 0.62), y + int(sh * 0.30)
+    k = ease_out(t / 0.5)
+    cursor(img, int(W - 120 + (tx - (W - 120)) * k), int(y + sh + 120 + (ty - (y + sh + 120)) * k), 0.5 < t < 0.7)
+    if t > 0.65:
+        # editor: barra con manijas que se cierran
+        e = ease_out((t - 0.65) / 0.6)
+        py = y + sh + 70
+        rounded(d, (60, py, W - 60, py + 270), 40, (30, 27, 42), outline=(90, 80, 125), width=3)
+        d.text((100, py + 30), "✂  Recortar", font=font(54), fill=WHITE)
+        bx0, bx1 = 110, W - 110
+        rounded(d, (bx0, py + 140, bx1, py + 160), 10, (60, 54, 84))
+        a = bx0 + int(260 * e)
+        b = bx1 - int(220 * e)
+        rounded(d, (a, py + 132, b, py + 168), 18, ORANGE)
+        for hx in (a, b):
+            rounded(d, (hx - 14, py + 112, hx + 14, py + 188), 10, YELLOW)
+        d.text((100, py + 200), f"queda: 0:{int(30 - 15 * e):02d}", font=font(40, False), fill=MUTED)
 
 
-def sc_features(img, t, p):
+def sc_link(img, t, dur, ctx):
     d = ImageDraw.Draw(img)
-    items = [("Ver y recortar", "mientras lo mirás, al instante", ORANGE),
-             ("Copiar link", "lo abre cualquiera, sin la app", PINK),
-             ("Achicar para Discord", "menos de 10 MB, sin Nitro", (88, 101, 242)),
-             ("Favoritos y nombres", "\"ace en Valorant\"", (255, 196, 0))]
-    for i, (a, b, c) in enumerate(items):
-        k = ease_back((t - i * 0.32) / 0.3)
-        if k <= 0:
+    toast(img, 200 - 360 * (1 - ease_out(t / 0.3)), "Link copiado", "lo abre cualquiera, sin la app", ctx["icon"], BLUE)
+    # chat que reacciona
+    bubbles = [(0.35, True, "litter.catbox.moe/jugada.mp4"), (0.75, False, "QUÉ JUGADAAA"), (1.05, False, "sos un crack")]
+    for i, (t0, mine, msg) in enumerate(bubbles):
+        if t < t0:
             continue
-        y = 300 + i * 270
-        x0 = 110 - int(700 * (1 - min(k, 1)))
-        rounded(d, (x0, y, x0 + W - 220, y + 220), 44, (36, 32, 50), outline=c, width=6)
-        d.ellipse((x0 + 40, y + 60, x0 + 140, y + 160), fill=c)
-        d.text((x0 + 180, y + 42), a, font=font(66), fill=WHITE)
-        d.text((x0 + 182, y + 128), b, font=font(44, False), fill=MUTED)
+        k = ease_back((t - t0) / 0.22)
+        f = font(50, not mine)
+        w = d.textlength(msg, font=f) + 80
+        y = 560 + i * 200
+        x0 = W - 80 - w if mine else 80
+        sub = Image.new("RGBA", (int(w), 150), (0, 0, 0, 0))
+        sd = ImageDraw.Draw(sub)
+        sd.rounded_rectangle((0, 0, w - 1, 149), 44, fill=(0, 132, 255, 255) if mine else (52, 46, 72, 255))
+        sd.text((40, 44), msg, font=f, fill=WHITE)
+        paste_center(img, sub, x0 + w / 2, y + 75, k)
+    sticker(img, "🔥", 760, 860, 0.85, t, 120)
+    sticker(img, "😂", 600, 1060, 1.15, t, 120)
 
 
-def sc_f8(img, t, p):
-    keycap(img, W // 2, 620, "F8", 0.25 < t < 0.55, color=RED)
+def sc_free(img, t, dur, ctx):
+    words = ctx["words"]
+    # cada palabra fuerte cae en su momento exacto de la voz
+    marks = [w[0] for w in words if w[1].lower().strip(".,!¡¿?…") in ("gratis", "cuentas", "vueltas")] or [0.0, dur * 0.35, dur * 0.7]
+    labels = [("GRATIS", YELLOW, ORANGE, 230), ("SIN CUENTAS", WHITE, (200, 200, 220), 120), ("SIN VUELTAS", PINK, ORANGE, 120)]
+    for i, (lab, c1, c2, size) in enumerate(labels):
+        t0 = marks[min(i, len(marks) - 1)] - (0.15 if i else 0.0)
+        if t < t0:
+            continue
+        s = ease_back((t - t0) / 0.2)
+        grad_text(img, 420 + i * 300 + (0 if i == 0 else 60), lab, int(size * min(1.12, s)), c1, c2)
+    sticker(img, "💸", 200, 300, 0.1, t, 160, -14)
+
+
+def sc_cta(img, t, dur, ctx):
     d = ImageDraw.Draw(img)
-    if t > 0.5:
-        on = int(t * 2.5) % 2 == 0
-        if on:
-            d.ellipse((250, 1000, 330, 1080), fill=RED)
-        secs = int((t - 0.5) * 6)
-        d.text((360, 985), f"REC  00:{secs:02d}", font=font(100), fill=WHITE)
-        chip(d, W // 2, 1170, "pantalla completa  ·  o una sola ventana", 44)
-
-
-def sc_free(img, t, p):
-    d = ImageDraw.Draw(img)
+    icon = ctx["icon"]
     s = ease_back(t / 0.35)
-    if s > 0:
-        gradient_text(img, 470, "GRATIS", max(10, int(230 * min(s, 1.1))))
-    for i, w_ in enumerate(["sin cuentas", "sin publicidad", "sin marca de agua"]):
-        k = ease_out((t - 0.4 - i * 0.25) / 0.3)
-        if k > 0:
-            chip(d, W // 2, 860 + i * 150 + int(40 * (1 - k)), "✓  " + w_, 52, fill=(30, 70, 50), color=(170, 255, 200))
+    paste_center(img, icon, W // 2, 560, 0.75 * min(1.1, s), math.sin(t * 3) * 4)
+    if t > 0.2:
+        grad_text(img, 820, "JUGADÓN", 180)
+    if t > 0.4:
+        pulse = 1 + 0.07 * math.sin(t * 10)
+        bw, bh = int(780 * pulse), int(160 * pulse)
+        top = 1080
+        sub = Image.new("RGBA", (bw, bh), (0, 0, 0, 0))
+        ImageDraw.Draw(sub).rounded_rectangle((0, 0, bw - 1, bh - 1), bh // 2, fill=ORANGE + (255,))
+        img.paste(sub, ((W - bw) // 2, top), sub)
+        tc(d, top + bh / 2 - 44, "DESCARGALO GRATIS", int(66 * pulse))
+        ay = 1300 + 26 * abs(math.sin(t * 6))
+        d.polygon([(W / 2 - 60, ay), (W / 2 + 60, ay), (W / 2, ay + 74)], fill=WHITE)
+        tc(d, 1400, "link en la bio", 54, MUTED, black=False)
+    sticker(img, "👇", W - 210, 1330, 0.5, t, 150)
 
 
-def sc_cta(img, t, p, icon):
-    d = ImageDraw.Draw(img)
-    s = ease_back(t / 0.4)
-    sz = max(1, int(380 * min(s, 1.1)))
-    ic = icon.resize((sz, sz), Image.LANCZOS)
-    img.paste(ic, ((W - sz) // 2, 360 + (380 - sz) // 2), ic)
-    if t > 0.25:
-        gradient_text(img, 800, "JUGADÓN", 170)
-    if t > 0.45:
-        text_center(d, 1010, "clips de juegos para PCs de pocos recursos", 42, MUTED, black=False)
-        pulse = 1 + 0.06 * math.sin(t * 9)
-        bw, bh = int(720 * pulse), int(150 * pulse)
-        rounded(d, ((W - bw) / 2, 1120, (W + bw) / 2, 1120 + bh), bh // 2, ORANGE)
-        text_center(d, 1120 + bh / 2 - 42, "DESCARGALO GRATIS", int(62 * pulse))
-        # flecha hacia abajo (link en la bio)
-        ay = 1340 + 18 * math.sin(t * 7)
-        d.polygon([(W / 2 - 50, ay), (W / 2 + 50, ay), (W / 2, ay + 60)], fill=WHITE)
+SCENES = {"hook": sc_hook, "fix": sc_fix, "f9": sc_f9, "gpu": sc_gpu, "light": sc_light, "edit": sc_edit, "link": sc_link, "free": sc_free, "cta": sc_cta}
 
 
-# ---------------------------------------------------------------- subtítulos palabra por palabra
+# ---------------------------------------------------------------- subtítulos
 
-def caption(img, words, idx, pop):
-    """Muestra un grupo de hasta 3 palabras; la que se está diciendo va en amarillo y más grande."""
-    d = ImageDraw.Draw(img)
+def caption(img, words, t):
+    """Grupos de hasta 3 palabras; la que se dice ahora rebota y va en color (las clave, más grandes)."""
+    cur = [i for i, (wt, _) in enumerate(words) if wt <= t]
+    if not cur:
+        return
+    idx = cur[-1]
     g0 = (idx // 3) * 3
     group = words[g0:g0 + 3]
-    sizes = []
-    for j, w_ in enumerate(group):
-        sz = 84 if g0 + j == idx else 76
+    d = ImageDraw.Draw(img)
+    items = []
+    for j, (wt, w_) in enumerate(group):
+        clean = w_.strip(".,!¡¿?…:").lower()
+        key = clean in KEYWORDS
+        size = 104 if key else 90
         if g0 + j == idx:
-            sz = int(sz * (1 + 0.15 * (1 - pop)))
-        sizes.append(sz)
-    gap = 26
-    widths = [d.textlength(w_.upper(), font=font(s_)) for w_, s_ in zip(group, sizes)]
-    total = sum(widths) + gap * (len(group) - 1)
-    if total > W - 100:  # que entre siempre
-        k = (W - 100) / total
-        sizes = [int(s_ * k) for s_ in sizes]
-        widths = [d.textlength(w_.upper(), font=font(s_)) for w_, s_ in zip(group, sizes)]
-        total = sum(widths) + gap * (len(group) - 1)
+            size = int(size * (1 + 0.22 * max(0.0, 1 - (t - wt) / 0.12)))
+        col = (YELLOW if (g0 + j) % 2 == 0 else ORANGE) if g0 + j == idx else (PINK if key and g0 + j < idx else WHITE)
+        if key and g0 + j == idx:
+            col = YELLOW
+        items.append((w_.upper().strip(), size, col))
+    gap = 24
+    widths = [d.textlength(s, font=font(z)) for s, z, _ in items]
+    total = sum(widths) + gap * (len(items) - 1)
+    if total > W - 80:
+        k = (W - 80) / total
+        items = [(s, int(z * k), c) for s, z, c in items]
+        widths = [d.textlength(s, font=font(z)) for s, z, _ in items]
+        total = sum(widths) + gap * (len(items) - 1)
     x = (W - total) / 2
-    for j, (w_, s_, wd) in enumerate(zip(group, sizes, widths)):
-        col = YELLOW if g0 + j == idx else WHITE
-        d.text((x, 1560 - s_ / 2), w_.upper(), font=font(s_), fill=col, stroke_width=9, stroke_fill=(0, 0, 0))
+    for (s, z, c), wd in zip(items, widths):
+        d.text((x, 1530 - z / 2), s, font=font(z), fill=c, stroke_width=10, stroke_fill=(0, 0, 0))
         x += wd + gap
 
 
@@ -516,7 +716,11 @@ def caption(img, words, idx, pop):
 def main():
     global BG, GLOWS
     ap = argparse.ArgumentParser()
-    ap.add_argument("--voice", help="modelo .onnx de Piper (sin esto: sin voz, para probar)")
+    ap.add_argument("--no-voice", action="store_true", help="sin voz (para probar el armado)")
+    ap.add_argument("--edge-voice", default="es-AR-TomasNeural")
+    ap.add_argument("--rate", default="+18%")
+    ap.add_argument("--pitch", default="+4Hz")
+    ap.add_argument("--voice", help="modelo .onnx de Piper (respaldo si edge-tts no anda)")
     ap.add_argument("--piper", default="piper")
     ap.add_argument("--out", default=os.path.join(REPO, "promo", "out", "Jugadon-promo.mp4"))
     ap.add_argument("--tmp", default="/tmp/jugadon_promo")
@@ -527,63 +731,82 @@ def main():
     random.seed(1)
 
     BG = gradient_bg()
-    GLOWS = [(glow(ORANGE, 420), -200, -300, 0.5), (glow(PINK, 480), 200, 300, 0.4), (glow((120, 60, 255), 360), 0, 0, 0.3)]
+    GLOWS = [(glow(ORANGE, 430), 0.5), (glow(PINK, 500), 0.4), (glow((120, 60, 255), 380), 0.3)]
     icon = Image.open(os.path.join(REPO, "assets", "icon.png")).convert("RGBA")
     shot = Image.open(os.path.join(REPO, "assets", "captura_ventana.png")).convert("RGB")
 
     voices = synth_voice(args)
-    # duración de cada escena: lo que dura la voz + un respiro (sin voz: por cantidad de letras)
-    durs = []
-    for i, (say, cap, _) in enumerate(SCRIPT):
-        v = len(voices[i]) / SR if voices else len(say) * 0.055
-        durs.append(max(2.0, v + 0.35))
+    durs, words_per = [], []
+    for i, (say, _) in enumerate(SCRIPT):
+        if voices:
+            a, ws = voices[i]
+            v = len(a) / SR
+        else:
+            ws_ = say.split()
+            v = len(say) * 0.05
+            wt = [len(x) + 2 for x in ws_]
+            acc, ws = 0, []
+            for x, k in zip(ws_, wt):
+                ws.append((v * acc / sum(wt), x))
+                acc += k
+        durs.append(max(1.4, v + 0.18))
+        words_per.append(ws)
     starts = np.cumsum([0] + durs[:-1]).tolist()
-    total = sum(durs) + 0.6
+    total = sum(durs) + 0.25
+    beat = 60 / BPM
     print(f"duración total: {total:.1f} s")
 
-    # ---------- audio
+    fx = FX()
+    hook_freeze = durs[0] * 0.58
     drop = starts[1]
-    mus = music(total, drop) * 0.55
+    fx.impact(hook_freeze, 1.3)
+    fx.impact(starts[1] + 0.32, 1.4, W // 2, 980)
+    fx.confetti(starts[1] + 0.32, W // 2, 980, 80, 1)
+    fx.confetti(starts[2] + 0.8, W // 2, 330, 70, 2)
+    fx.impact(starts[4] + 1.1, 0.8)
+    fx.confetti(starts[6] + 0.8, W // 2, 900, 60, 3)
+    for k, (wt, w_) in enumerate(words_per[7]):
+        if w_.lower().strip(".,!") in ("gratis", "cuentas", "vueltas"):
+            fx.impact(starts[7] + wt, 1.0)
+    fx.confetti(starts[8] + 0.3, W // 2, 560, 90, 4)
+
+    # ---------- audio
+    mus = music(total, drop, beat) * 0.5
     voice_track = np.zeros_like(mus)
     sfx = np.zeros_like(mus)
     for i, st in enumerate(starts):
         if voices:
-            add(voice_track, voices[i], st + 0.12, 1.0)
+            add(voice_track, voices[i][0], st + 0.05, 1.0)
         if i > 0:
-            add(sfx, whoosh(), st - 0.15, 0.7)
-    add(sfx, boom(), 0.0, 0.7)
-    add(sfx, riser(drop - 0.3), 0.3, 0.6)
-    add(sfx, boom(), drop, 0.8)
-    add(sfx, keyclick(), starts[1] + 0.35, 1.0)
-    add(sfx, ding(), starts[1] + 0.6, 1.0)
-    add(sfx, keyclick(), starts[6] + 0.25, 1.0)
-    add(sfx, ding(), starts[8] + 0.3, 0.8)
-    # la música baja cuando habla la voz ("ducking")
+            add(sfx, whoosh(), st - 0.18, 0.55)
+    add(sfx, riser(hook_freeze), 0.0, 0.5)
+    add(sfx, scratch(), hook_freeze - 0.05, 0.9)
+    add(sfx, boom(), starts[1] + 0.32, 0.9)
+    add(sfx, click(), starts[1] + 0.32, 1.0)
+    add(sfx, ding(), starts[2] + 0.75, 1.0)
+    add(sfx, ding(), starts[6] + 0.0, 0.8)
+    for t0, s, _, _ in fx.impacts:
+        add(sfx, boom()[: int(SR * 0.5)] * 0.6, t0, s * 0.6)
+    for i in range(5):
+        add(sfx, pop(), 0.12 + i * 0.22, 0.5)
+    for t0 in (0.35, 0.75, 1.05):
+        add(sfx, pop(), starts[6] + t0, 0.6)
+    # "ducking": la música baja cuando habla la voz
     if voices:
-        envv = np.abs(voice_track)
-        k = int(SR * 0.15)
-        envv = np.convolve(envv, np.ones(k) / k, mode="same")
-        duck = 1 - 0.6 * np.clip(envv * 8, 0, 1)
-        mus *= duck
-    mix = mus + voice_track * 1.1 + sfx
-    mix /= max(1.0, np.max(np.abs(mix)) / 0.95)
+        k = int(SR * 0.12)
+        envv = np.convolve(np.abs(voice_track), np.ones(k) / k, mode="same")
+        mus *= 1 - 0.55 * np.clip(envv * 9, 0, 1)
+    # en el congelado del gancho la música se corta (silencio dramático)
+    i0, i1 = int(hook_freeze * SR), int(drop * SR)
+    mus[i0:i1] *= 0.08
+    mix = mus + voice_track * 1.25 + sfx
+    mix /= max(1.0, float(np.max(np.abs(mix))) / 0.95)
     wav = os.path.join(args.tmp, "mix.wav")
     with wave.open(wav, "wb") as w:
         w.setnchannels(1)
         w.setsampwidth(2)
         w.setframerate(SR)
         w.writeframes((mix * 32767).astype(np.int16).tobytes())
-
-    # ---------- palabras con su momento (proporcional a las letras de la voz)
-    timed = []
-    for i, (say, cap, _) in enumerate(SCRIPT):
-        words = cap.split()
-        weights = [len(x) + 2 for x in words]
-        span = durs[i] - 0.35
-        acc = 0
-        for wd, wt in zip(words, weights):
-            timed.append((starts[i] + 0.12 + span * acc / sum(weights), i, wd))
-            acc += wt
 
     # ---------- video
     only = set(int(x) for x in args.frames.split(",")) if args.frames else None
@@ -592,7 +815,7 @@ def main():
     if only is None:
         proc = subprocess.Popen(
             ["ffmpeg", "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{W}x{H}", "-r", str(FPS), "-i", "-",
-             "-i", wav, "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
+             "-i", wav, "-c:v", "libx264", "-preset", "medium", "-crf", "17", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
              "-shortest", "-movflags", "+faststart", args.out],
             stdin=subprocess.PIPE)
     for fi in range(nframes):
@@ -601,55 +824,42 @@ def main():
         t = fi / FPS
         si = max(i for i, s in enumerate(starts) if s <= t)
         lt = t - starts[si]
-        p = min(1.0, lt / durs[si])
-        kind = SCRIPT[si][2]
-        tint = (RED, 0.12 + 0.08 * math.sin(t * 10)) if kind == "hook" and p > 0.55 else None
-        img = background(t, tint)
-        if kind == "hook":
-            sc_hook(img, lt, p)
-        elif kind == "f9":
-            sc_f9(img, lt, p, icon)
-        elif kind == "gpu":
-            sc_gpu(img, lt, p)
-        elif kind == "light":
-            sc_light(img, lt, p)
-        elif kind == "gallery":
-            sc_gallery(img, lt, p, shot)
-        elif kind == "features":
-            sc_features(img, lt, p)
-        elif kind == "f8":
-            sc_f8(img, lt, p)
-        elif kind == "free":
-            sc_free(img, lt, p)
-        else:
-            sc_cta(img, lt, p, icon)
-        # subtítulo
-        cur = [x for x in timed if x[0] <= t and x[1] == si]
-        if cur and kind != "cta":
-            words = [x[2] for x in timed if x[1] == si]
-            idx = len(cur) - 1
-            pop = min(1.0, (t - cur[-1][0]) / 0.12)
-            caption(img, words, idx, pop)
-        # logo chico arriba (marca de agua de la promo)
+        kind = SCRIPT[si][1]
+        img = background(t, si)
+        ctx = {"icon": icon, "shot": shot, "words": words_per[si]}
+        SCENES[kind](img, lt, durs[si], ctx)
+        fx.draw(img, t)
         if kind != "cta":
-            ic = icon.resize((72, 72), Image.LANCZOS)
-            img.paste(ic, (60, 90), ic)
-            ImageDraw.Draw(img).text((148, 98), "Jugadón", font=font(48), fill=WHITE)
-        # zoom "punch" al empezar cada escena + temblor en el gancho
-        z = 1 + 0.07 * math.exp(-lt * 9)
-        if kind == "hook" and p > 0.55:
-            z += 0.02
-        if z > 1.001:
+            caption(img, [(starts[si] + 0.05 + wt - starts[si], w_) for wt, w_ in words_per[si]], lt)
+        # barra de progreso arriba (retención) y logo
+        d = ImageDraw.Draw(img)
+        d.rectangle((0, 0, W, 14), fill=(40, 34, 56))
+        pw = int(W * t / total)
+        if pw > 2:
+            d.rectangle((0, 0, pw, 14), fill=ORANGE)
+        if kind != "cta":
+            ic = icon.resize((70, 70), Image.LANCZOS)
+            img.paste(ic, (56, 64), ic)
+            d.text((142, 72), "Jugadón", font=font(46), fill=WHITE)
+        # zoom: golpe al empezar la escena + latido con el beat (después del drop)
+        z = 1 + 0.08 * math.exp(-lt * 9)
+        if t >= drop:
+            ph = ((t - drop) % beat) / beat
+            z += 0.022 * math.exp(-ph * 7)
+        dx, dy = fx.shake(t)
+        if z > 1.001 or dx or dy:
             cw, ch = int(W / z), int(H / z)
-            dx = dy = 0
-            if kind == "hook" and p > 0.55:
-                dx, dy = random.randint(-14, 14), random.randint(-14, 14)
             x0 = max(0, min(W - cw, (W - cw) // 2 + dx))
             y0 = max(0, min(H - ch, (H - ch) // 2 + dy))
             img = img.crop((x0, y0, x0 + cw, y0 + ch)).resize((W, H), Image.BILINEAR)
-        # destello blanco en el corte
-        if si > 0 and lt < 0.08:
-            img = Image.blend(img, Image.new("RGB", (W, H), WHITE), 0.55 * (1 - lt / 0.08))
+        # corte: glitch + destello
+        if si > 0 and lt < 0.12:
+            img = glitch(img, 1 - lt / 0.12, fi)
+            if lt < 0.05:
+                img = Image.blend(img, Image.new("RGB", (W, H), WHITE), 0.45)
+        # final: glitch que vuelve al principio (loop)
+        if t > total - 0.15:
+            img = glitch(img, (t - (total - 0.15)) / 0.15, fi)
         if only is not None:
             img.save(os.path.join(args.tmp, f"frame_{fi}.png"))
         else:
