@@ -172,7 +172,8 @@ mod logic {
         a.extend(s(&["-f", "lavfi", "-i"]));
         a.push(format!("ddagrab=framerate={fps}:draw_mouse=1"));
         if let Some((rate, ch)) = audio {
-            a.extend(s(&["-thread_queue_size", "1024", "-f", "f32le", "-ar"]));
+            // sin probesize/analyzeduration ffmpeg lee ~5 s de audio antes de arrancar el video (desfase)
+            a.extend(s(&["-thread_queue_size", "1024", "-probesize", "32", "-analyzeduration", "0", "-f", "f32le", "-ar"]));
             a.push(rate.to_string());
             a.push("-ac".into());
             a.push(ch.to_string());
@@ -315,7 +316,7 @@ mod logic {
         fn record_args_gpu_with_audio() {
             let a = record_args(0, 60, 30, Some((48000, 2)), "C:\\T\\rclip_buf").join(" ");
             assert!(a.contains("-f lavfi -i ddagrab=framerate=60:draw_mouse=1"));
-            assert!(a.contains("-thread_queue_size 1024 -f f32le -ar 48000 -ac 2 -i pipe:0 -map 0:v -map 1:a"));
+            assert!(a.contains("-thread_queue_size 1024 -probesize 32 -analyzeduration 0 -f f32le -ar 48000 -ac 2 -i pipe:0 -map 0:v -map 1:a"));
             assert!(a.contains("-vf scale_d3d11=width=-2:height=720:format=nv12 -c:v h264_nvenc -preset p1 -tune ll -rc cbr"));
             assert!(a.contains("-b:v 9M -maxrate 9M -bufsize 18M -g 120 -bf 0"));
             assert!(a.contains("-c:a aac -b:a 160k"));
@@ -397,7 +398,7 @@ mod win_tests {
         eprintln!("ffmpeg empezó a leer después de {} ms", t_pre.elapsed().as_millis());
         let t0 = Instant::now();
         let mut frames = 0u64;
-        while t0.elapsed() < Duration::from_secs(7) {
+        while t0.elapsed() < Duration::from_secs(8) {
             let mut buf = Vec::with_capacity(4800 * 2 * 4);
             for i in 0..4800u64 {
                 let v = ((frames + i) as f32 * 440.0 * std::f32::consts::TAU / 48000.0).sin() * 0.3;
