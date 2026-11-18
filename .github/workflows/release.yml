@@ -207,7 +207,11 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add assets/captura_ventana.png
           git diff --cached --quiet
-          if ($LASTEXITCODE -ne 0) { git commit -m "Foto de la ventana Mis clips (generada en CI)"; git push }
+          if ($LASTEXITCODE -ne 0) {
+            git commit -m "Foto de la ventana Mis clips (generada en CI)"
+            git pull --rebase origin main
+            git push origin HEAD:main
+          }
 
       - uses: actions/upload-artifact@v4
         with:
