@@ -95,16 +95,19 @@ La configuración está en `%APPDATA%\Jugadon\config.ini`. Ahí también se pued
 
 ### PC de bajos recursos (por ejemplo i3-2100 con 4 GB)
 
-Jugadón está pensado para estas PCs. Hay una sola cosa que define si se nota o no: **si tu placa de video puede comprimir video por su cuenta**.
+Jugadón está pensado para estas PCs. Lo que define si se nota o no es **quién comprime el video**:
 
-| Tu placa | Qué pasa |
-|---|---|
-| NVIDIA GTX 600 o más nueva (no la GT 1030), AMD con VCE, Intel HD 4000 o más nueva | Comprime la placa, en un chip aparte. La CPU casi no trabaja y no deberías notar bajón de FPS. |
-| Placas más viejas o sin encoder (por ejemplo Intel HD 2000/3000 del i3-2100, GT 710/1030) | Jugadón pasa solo a x264. Ahí comprime la CPU, así que se limita a **480p 30 fps** con 2 hilos y prioridad baja. En un procesador de 2 núcleos **se puede notar algo de FPS**; ese es el costo de no tener encoder en la placa. |
+| Tu PC | Quién comprime | Qué esperar en 720p 30 fps |
+|---|---|---|
+| Placa con encoder: NVIDIA GTX 600 o más nueva (no la GT 710/1030), AMD con VCE/VCN | El chip de video de la placa, aparte de lo que usa el juego | No deberías notar bajón de FPS |
+| Gráficos Intel con Quick Sync (el i3-2100 lo tiene, HD 2000) | Intel Quick Sync, si el driver lo deja usar | Bajo impacto. Con drivers muy viejos puede no estar disponible |
+| Sin encoder disponible | El procesador (x264 "ultrafast", 2 hilos, prioridad baja) | Funciona, pero en un procesador de 2 núcleos **se nota algo**. Si te molesta, pasá a **480p** |
 
-Si pasás el mouse por el ícono, te dice cuál está usando. Si dice "usa CPU", tenés dos opciones: grabar solo cuando haga falta (**Clips en segundo plano → Apagado** y F8 cuando quieras), o usar **Calidad → 480p 30 fps**.
+Jugadón prueba solo, en ese orden, y se queda con lo más liviano que funcione en tu PC. Si pasás el mouse por el ícono, te dice cuál usa; si dice "usa CPU", estás en la última fila.
 
-En todos los casos:
+Con drivers viejos (Windows 10 con el driver de Intel HD 2000/3000) puede no estar la captura moderna de Windows. En ese caso graba por **GDI**, que anda en cualquier PC pero carga más la CPU.
+
+Siempre, en cualquier PC:
 - **Clips en segundo plano → Solo mientras juego** (viene así): fuera del juego no corre nada.
 - Guardar un clip **nunca** recomprime: une los pedazos en un mp4, con prioridad baja. No debería trabar el juego.
 - Con 4 GB de RAM: en reposo Jugadón no ocupa casi nada. Mientras graba, el que ocupa RAM es `ffmpeg.exe`; miralo en el Administrador de tareas.

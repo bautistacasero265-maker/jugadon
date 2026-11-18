@@ -157,6 +157,8 @@ mod logic {
 
     pub struct Enc {
         pub label: &'static str,
+        /// captura por GDI (para drivers viejos sin Desktop Duplication, ej. Intel HD 2000/3000)
+        pub gdi: bool,
         pub vf: &'static str,
         pub codec: &'static str,
         pub opts: &'static [&'static str],
@@ -173,27 +175,30 @@ mod logic {
 
     /// Orden de prueba: todo en GPU primero, después escalado en CPU, último x264.
     /// ("720" en vf se reemplaza por el alto elegido.)
-    pub const ENCODERS: [Enc; 8] = [
-        Enc { label: "NVENC", vf: GPU, codec: "h264_nvenc", opts: NV },
-        Enc { label: "AMF", vf: GPU, codec: "h264_amf", opts: AMF },
+    pub const ENCODERS: [Enc; 9] = [
+        Enc { gdi: false, label: "NVENC", vf: GPU, codec: "h264_nvenc", opts: NV },
+        Enc { gdi: false, label: "AMF", vf: GPU, codec: "h264_amf", opts: AMF },
         Enc {
+            gdi: false,
             label: "QSV",
             vf: "scale_d3d11=width=-2:height=min(720\\,trunc(ih/2)*2):format=nv12,hwmap=derive_device=qsv,format=qsv",
             codec: "h264_qsv",
             opts: QSV,
         },
-        Enc { label: "NVENC (escala CPU)", vf: CPU, codec: "h264_nvenc", opts: NV },
-        Enc { label: "AMF (escala CPU)", vf: CPU, codec: "h264_amf", opts: AMF },
-        Enc { label: "QSV (escala CPU)", vf: CPU, codec: "h264_qsv", opts: QSV },
+        Enc { gdi: false, label: "NVENC (escala CPU)", vf: CPU, codec: "h264_nvenc", opts: NV },
+        Enc { gdi: false, label: "AMF (escala CPU)", vf: CPU, codec: "h264_amf", opts: AMF },
+        Enc { gdi: false, label: "QSV (escala CPU)", vf: CPU, codec: "h264_qsv", opts: QSV },
         // la placa escala (barato) y la CPU solo comprime un video chico
-        Enc { label: "x264 (escala GPU)", vf: "scale_d3d11=width=-2:height=min(720\\,trunc(ih/2)*2):format=nv12,hwdownload,format=nv12", codec: "libx264", opts: X264 },
-        Enc { label: "x264 (CPU)", vf: CPU, codec: "libx264", opts: X264 },
+        Enc { gdi: false, label: "x264 (escala GPU)", vf: "scale_d3d11=width=-2:height=min(720\\,trunc(ih/2)*2):format=nv12,hwdownload,format=nv12", codec: "libx264", opts: X264 },
+        Enc { gdi: false, label: "x264 (CPU)", vf: CPU, codec: "libx264", opts: X264 },
+        // último recurso: driver sin Desktop Duplication (WDDM 1.1). Captura por GDI, todo en CPU.
+        Enc { gdi: true, label: "x264 (captura GDI)", vf: "scale=-2:min(720\\,trunc(ih/2)*2):flags=fast_bilinear,format=nv12", codec: "libx264", opts: X264 },
     ];
 
-    /// Alto y fps reales para un encoder: x264 usa CPU, así que se limita a 480p 30 fps.
+    /// Alto y fps reales para un encoder: x264 usa CPU, así que nunca pasa de 30 fps.
     pub fn effective(enc: usize, height: u32, fps: u32) -> (u32, u32) {
         if ENCODERS[enc].codec == "libx264" {
-            (height.min(480), fps.min(30))
+            (height, fps.min(30))
         } else {
             (height, fps)
         }
@@ -238,11 +243,16 @@ mod logic {
         if audio.is_none() {
             a.push("-nostdin".into());
         }
-        a.extend(s(&["-f", "lavfi", "-i"]));
-        a.push(match src {
-            Source::Screen => format!("ddagrab=framerate={fps}:draw_mouse=1"),
-            Source::Window(h) => format!("gfxcapture=hwnd={h}:max_framerate={fps}:capture_cursor=1"),
-        });
+        if e.gdi {
+            a.extend(["-f".into(), "gdigrab".into(), "-framerate".into(), fps.to_string(), "-draw_mouse".into(), "1".into()]);
+            a.extend(s(&["-i", "desktop"]));
+        } else {
+            a.extend(s(&["-f", "lavfi", "-i"]));
+            a.push(match src {
+                Source::Screen => format!("ddagrab=framerate={fps}:draw_mouse=1"),
+                Source::Window(h) => format!("gfxcapture=hwnd={h}:max_framerate={fps}:capture_cursor=1"),
+            });
+        }
         if let Some((rate, ch)) = audio {
             // sin probesize/analyzeduration ffmpeg lee ~5 s de audio antes de arrancar el video (desfase)
             a.extend(s(&["-thread_queue_size", "128", "-probesize", "32", "-analyzeduration", "0", "-f", "f32le", "-ar"]));
@@ -254,7 +264,7 @@ mod logic {
             a.extend(s(&["-map", "0:v"]));
         }
         a.extend(["-vf".into(), vf]);
-        if matches!(src, Source::Window(_)) {
+        if matches!(src, Source::Window(_)) && !e.gdi {
             // la captura de ventana manda cuadros solo cuando la ventana cambia: video a fps fijos
             a.extend(["-fps_mode".into(), "cfr".into(), "-r".into(), fps.to_string()]);
         }
@@ -333,6 +343,11 @@ mod logic {
             "1",
             out,
         ])
+    }
+
+    /// Captura por GDI (si el driver no tiene Desktop Duplication).
+    pub fn shot_args_gdi(out: &str) -> Vec<String> {
+        s(&["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-f", "gdigrab", "-i", "desktop", "-frames:v", "1", "-update", "1", "-compression_level", "1", out])
     }
 
     pub fn stamp(y: u16, mo: u16, d: u16, h: u16, mi: u16, sec: u16) -> String {
@@ -587,14 +602,18 @@ mod logic {
         fn record_args_cpu_no_audio() {
             let a = record_args(7, 720, 30, Source::Screen, None, Out::Segments { secs: 60, dir: "D" }).join(" ");
             assert!(a.contains("-nostdin"));
-            // x264 en CPU: siempre 480p 30 fps y 2 hilos, aunque se pida 720p
-            assert!(a.contains("-map 0:v -vf hwdownload,format=bgra,scale=-2:min(480\\,trunc(ih/2)*2)"));
+            // x264 en CPU: 720p si se pide, máximo 30 fps, 2 hilos
+            assert!(a.contains("-map 0:v -vf hwdownload,format=bgra,scale=-2:min(720\\,trunc(ih/2)*2)"));
             assert!(a.contains("-c:v libx264 -preset ultrafast -tune zerolatency -threads 2"));
-            assert!(a.contains("-b:v 2500k"));
+            assert!(a.contains("-b:v 6000k"));
             assert!(a.contains("-g 60"));
             let a = record_args(6, 720, 60, Source::Screen, None, Out::File("x")).join(" ");
             assert!(a.contains("ddagrab=framerate=30:"));
-            assert!(a.contains("scale_d3d11=width=-2:height=min(480\\,trunc(ih/2)*2):format=nv12,hwdownload,format=nv12"));
+            assert!(a.contains("scale_d3d11=width=-2:height=min(720\\,trunc(ih/2)*2):format=nv12,hwdownload,format=nv12"));
+            // GDI: otra entrada, sin lavfi
+            let a = record_args(8, 720, 30, Source::Screen, None, Out::File("x")).join(" ");
+            assert!(a.contains("-f gdigrab -framerate 30 -draw_mouse 1 -i desktop -map 0:v -vf scale=-2:min(720"));
+            assert!(!a.contains("lavfi"));
             // 480p elegido por el usuario, con encoder de placa
             let a = record_args(0, 480, 30, Source::Screen, None, Out::File("x")).join(" ");
             assert!(a.contains("height=min(480") && a.contains("-b:v 2500k") && a.contains("h264_nvenc"));
@@ -717,8 +736,7 @@ mod win_tests {
         let info = String::from_utf8_lossy(&o.stdout).to_string();
         eprintln!("{info}");
         assert!(info.contains("codec_name=h264") && info.contains("codec_name=aac"), "{info}");
-        // x264 (sin placa de video en CI) graba a 480p para no cargar la CPU
-        assert!(info.contains("height=480"), "{info}");
+        assert!(info.contains("width=1280") && info.contains("height=720"), "{info}");
         let durs: Vec<f64> = info.lines().filter_map(|l| l.strip_prefix("duration=")).filter_map(|v| v.parse().ok()).collect();
         assert_eq!(durs.len(), 2, "{info}");
         assert!(durs.iter().all(|d| (5.0..=9.0).contains(d)), "duración rara: {durs:?}");
@@ -763,10 +781,64 @@ mod win_tests_manual {
             .unwrap();
         let info = String::from_utf8_lossy(&o.stdout).to_string();
         eprintln!("{info}");
-        // x264 limita a 480p (una ventana más chica no se agrandaría)
-        assert!(info.contains("codec_name=h264") && info.contains("height=480"), "{info}");
+        // 601 px de alto -> 600: una ventana chica no se agranda a 720 y queda par
+        assert!(info.contains("codec_name=h264") && info.contains("height=600"), "{info}");
         let dur: f64 = info.lines().find_map(|l| l.strip_prefix("duration=")).and_then(|v| v.parse().ok()).unwrap_or(0.0);
         assert!((1.5..=5.0).contains(&dur), "duración rara: {dur}");
+    }
+}
+
+/// Captura real de pantalla por GDI (el respaldo para drivers viejos) con los mismos argumentos que la app.
+/// En el servidor de CI puede no haber escritorio: en ese caso se saltea con un aviso.
+#[cfg(all(test, windows))]
+mod win_tests_gdi {
+    use crate::logic;
+    use std::os::windows::io::AsRawHandle;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    fn cpu_ms(child: &std::process::Child) -> f64 {
+        use windows::Win32::Foundation::{FILETIME, HANDLE};
+        use windows::Win32::System::Threading::GetProcessTimes;
+        let (mut a, mut b, mut k, mut u) = (FILETIME::default(), FILETIME::default(), FILETIME::default(), FILETIME::default());
+        unsafe {
+            let _ = GetProcessTimes(HANDLE(child.as_raw_handle() as _), &mut a, &mut b, &mut k, &mut u);
+        }
+        let t = |f: FILETIME| ((f.dwHighDateTime as u64) << 32 | f.dwLowDateTime as u64) as f64 / 10_000.0;
+        t(k) + t(u)
+    }
+
+    #[test]
+    fn gdi_screen_capture_720p30() {
+        let Ok(ff) = std::env::var("RCLIP_FFMPEG") else { return };
+        let gdi = logic::ENCODERS.iter().position(|e| e.gdi).unwrap();
+        let ts = std::env::temp_dir().join("jugadon_test_gdi.ts").to_string_lossy().into_owned();
+        let args = logic::record_args(gdi, 720, 30, logic::Source::Screen, None, logic::Out::File(&ts));
+        let mut child = Command::new(&ff).args(&args).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
+        let t0 = Instant::now();
+        std::thread::sleep(Duration::from_secs(8));
+        if let Some(st) = child.try_wait().unwrap() {
+            let mut err = String::new();
+            use std::io::Read;
+            let _ = child.stderr.take().unwrap().read_to_string(&mut err);
+            eprintln!("GDI no disponible en este servidor ({st}): {err}");
+            return;
+        }
+        let cpu = cpu_ms(&child);
+        let wall = t0.elapsed().as_millis() as f64;
+        let _ = child.kill();
+        let _ = child.wait();
+        let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+        eprintln!(
+            "GDI + x264 720p30 en el servidor de CI ({cores} hilos): ffmpeg usó {:.0} % de un núcleo ({:.1} % del total)",
+            cpu / wall * 100.0,
+            cpu / wall * 100.0 / cores as f64
+        );
+        let probe = std::path::Path::new(&ff).with_file_name("ffprobe.exe");
+        let o = Command::new(probe).args(["-v", "error", "-show_entries", "stream=codec_name,height", "-of", "default=nw=1", &ts]).output().unwrap();
+        let info = String::from_utf8_lossy(&o.stdout).to_string();
+        eprintln!("{info}");
+        assert!(info.contains("codec_name=h264"), "{info}");
     }
 }
 
@@ -1542,9 +1614,16 @@ mod app {
             self.play_sound();
             let (ffmpeg, log) = (self.ffmpeg.clone(), self.log_path.clone());
             std::thread::spawn(move || {
+                let ffmpeg2 = ffmpeg.clone();
                 let mut cmd = Command::new(ffmpeg);
                 cmd.args(&args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(log_stdio(&log));
-                let ok = spawn_hidden(&mut cmd, IDLE).and_then(|mut c| c.wait()).is_ok_and(|s| s.success());
+                let mut ok = spawn_hidden(&mut cmd, IDLE).and_then(|mut c| c.wait()).is_ok_and(|s| s.success());
+                if !ok {
+                    // driver viejo sin Desktop Duplication: por GDI
+                    let mut cmd = Command::new(&ffmpeg2);
+                    cmd.args(logic::shot_args_gdi(&out)).stdin(Stdio::null()).stdout(Stdio::null()).stderr(log_stdio(&log));
+                    ok = spawn_hidden(&mut cmd, IDLE).and_then(|mut c| c.wait()).is_ok_and(|s| s.success());
+                }
                 if ok {
                     post_text(format!("Captura guardada: {name}\nClic acá para verla."), Some(out));
                 } else {
