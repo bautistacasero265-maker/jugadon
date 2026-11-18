@@ -388,6 +388,13 @@ mod win_tests {
         }
         let (r, mut w) = crate::audio::small_pipe().expect("pipe");
         let mut child = Command::new(&ff).args(&args).stdin(Stdio::from(r)).stdout(Stdio::null()).spawn().unwrap();
+        // igual que la app: el reloj arranca recién cuando ffmpeg empieza a leer (2da escritura bloquea)
+        let silence = vec![0u8; 480 * 2 * 4];
+        let t_pre = Instant::now();
+        for _ in 0..2 {
+            w.write_all(&silence).expect("pipe");
+        }
+        eprintln!("ffmpeg empezó a leer después de {} ms", t_pre.elapsed().as_millis());
         let t0 = Instant::now();
         let mut frames = 0u64;
         while t0.elapsed() < Duration::from_secs(7) {
