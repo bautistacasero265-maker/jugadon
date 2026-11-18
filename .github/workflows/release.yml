@@ -167,7 +167,8 @@ jobs:
           $h = [IntPtr]::Zero
           for ($k = 0; $k -lt 30 -and $h -eq [IntPtr]::Zero; $k++) {
             Start-Sleep -Seconds 1
-            $h = [W]::FindWindow("jugadon_gallery", $null)
+            $p.Refresh()
+            $h = $p.MainWindowHandle
           }
           Write-Host "----- jugadon.log -----"
           Get-Content "$env:TEMP\jugadon.log" -ErrorAction SilentlyContinue | Select-Object -Last 30
