@@ -1046,7 +1046,7 @@ mod app {
     use std::process::{Child, Command, Stdio};
     use std::sync::atomic::{AtomicIsize, AtomicU32, Ordering};
     use std::time::{Duration, Instant, UNIX_EPOCH};
-    use windows::core::{w, PCWSTR, PWSTR};
+    use windows::core::{w, PCWSTR};
     use windows::Win32::Foundation::*;
     use windows::Win32::Graphics::Gdi::*;
     use windows::Win32::System::JobObjects::*;
@@ -1107,21 +1107,6 @@ mod app {
         src: Source,
         what: String,
         audio: bool,
-    }
-
-    struct Gallery {
-        hwnd: HWND,
-        list: HWND,
-        buttons: Vec<HWND>,
-        font: HFONT,
-        big_font: HFONT,
-        /// logo en tamaño grande (el de la bandeja es de 16 px y se ve pixelado agrandado)
-        logo: HICON,
-        il: HIMAGELIST,
-        files: Vec<PathBuf>,
-        /// texto del encabezado (estado, cantidad de clips…)
-        header: String,
-        sub: String,
     }
 
     struct App {
@@ -1459,6 +1444,8 @@ mod app {
             unsafe {
                 let _ = Shell_NotifyIconW(NIM_MODIFY, &n);
             }
+            // el estado también se ve en la ventana "Mis clips"
+            self.redraw_gallery();
         }
 
         fn notify(&self, msg: &str, warn: bool) {
@@ -2157,18 +2144,6 @@ mod app {
 
     // ---------- ventana "Mis clips" ----------
 
-    const GALLERY_BUTTONS: [(usize, &str); 6] = [
-        (201, "▶  Abrir"),
-        (202, "Compartir…"),
-        (203, "Copiar (para Discord)"),
-        (204, "Mostrar en carpeta"),
-        (205, "Eliminar"),
-        (206, "Abrir carpeta"),
-    ];
-
-    fn send(h: HWND, msg: u32, wp: usize, lp: isize) -> isize {
-        unsafe { SendMessageW(h, msg, Some(WPARAM(wp)), Some(LPARAM(lp))).0 }
-    }
 
     /// Abre la ventana de compartir de Windows con el archivo.
     fn share_file(hwnd: HWND, path: String, token: &mut Option<i64>) -> windows::core::Result<()> {
@@ -2215,8 +2190,8 @@ mod app {
                     WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
                     CW_USEDEFAULT,
                     CW_USEDEFAULT,
-                    sc(900),
-                    sc(620),
+                    sc(1080),
+                    sc(700),
                     None,
                     None,
                     Some(hinst),
@@ -2230,94 +2205,62 @@ mod app {
                 let _ = SendMessageW(hwnd, WM_SETICON, Some(WPARAM(ICON_SMALL as usize)), Some(LPARAM(self.icon_on.0 as isize)));
                 let big = load_icon_size(hinst, 1, GetSystemMetrics(SM_CXICON));
                 let _ = SendMessageW(hwnd, WM_SETICON, Some(WPARAM(ICON_BIG as usize)), Some(LPARAM(big.0 as isize)));
-                // fuentes del sistema (Segoe UI): normal y grande en negrita para el título
-                let mut ncm = NONCLIENTMETRICSW { cbSize: std::mem::size_of::<NONCLIENTMETRICSW>() as u32, ..Default::default() };
-                let _ = SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, ncm.cbSize, Some(&mut ncm as *mut _ as _), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0));
-                let mut lf = ncm.lfMessageFont;
-                lf.lfHeight = -sc(15);
-                let font = CreateFontIndirectW(&lf);
-                lf.lfHeight = -sc(30);
-                lf.lfWeight = 800;
-                let big_font = CreateFontIndirectW(&lf);
-                let child = |class: PCWSTR, text: &str, style: u32, id: usize| -> HWND {
-                    let t = wide(text);
-                    let h = CreateWindowExW(
-                        WINDOW_EX_STYLE(0),
-                        class,
-                        PCWSTR(t.as_ptr()),
-                        WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | style),
-                        0,
-                        0,
-                        10,
-                        10,
-                        Some(hwnd),
-                        Some(HMENU(id as _)),
-                        Some(hinst),
-                        None,
-                    )
-                    .unwrap_or_default();
-                    let _ = SendMessageW(h, WM_SETFONT, Some(WPARAM(font.0 as usize)), Some(LPARAM(1)));
-                    h
+                let font = |px: i32, weight: i32, face: PCWSTR| {
+                    CreateFontW(-sc(px), 0, 0, 0, weight, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, 0, face)
                 };
-                // botones dibujados por nosotros (naranja / oscuro)
-                let buttons = GALLERY_BUTTONS.iter().map(|(id, t)| child(w!("BUTTON"), t, BS_OWNERDRAW as u32, *id)).collect();
-                let list = child(w!("SysListView32"), "", LVS_ICON | LVS_SHOWSELALWAYS | LVS_SINGLESEL | LVS_AUTOARRANGE | WS_TABSTOP.0, 300);
-                let _ = SetWindowTheme(list, w!("DarkMode_Explorer"), PCWSTR::null());
-                send(list, LVM_SETEXTENDEDLISTVIEWSTYLE, 0, LVS_EX_DOUBLEBUFFER as isize);
-                send(list, LVM_SETBKCOLOR, 0, BG_COLOR as isize);
-                send(list, LVM_SETTEXTBKCOLOR, 0, BG_COLOR as isize);
-                send(list, LVM_SETTEXTCOLOR, 0, 0x00F0_EBEB);
-                let (tw, th) = thumb_size(dpi);
-                let il = ImageList_Create(tw, th, ILC_COLOR32, 32, 32);
-                let logo = load_icon_size(hinst, 1, sc(64));
-                add_placeholders(il, tw, th, logo);
-                send(list, LVM_SETIMAGELIST, LVSIL_NORMAL as usize, il.0 as isize);
-                send(list, LVM_SETICONSPACING, 0, ((tw + sc(28)) as isize) | (((th + sc(52)) as isize) << 16));
-                self.gallery = Some(Gallery { hwnd, list, buttons, font, big_font, logo, il, files: Vec::new(), header: String::new(), sub: String::new() });
-                self.layout_gallery();
+                let ui = w!("Segoe UI");
+                let ic = w!("Segoe MDL2 Assets");
+                let fonts = Fonts {
+                    brand: font(24, 800, ui),
+                    h1: font(26, 700, ui),
+                    body: font(14, 400, ui),
+                    bold: font(14, 600, ui),
+                    small: font(12, 400, ui),
+                    badge: font(11, 700, ui),
+                    icon: font(16, 400, ic),
+                    icon_big: font(22, 400, ic),
+                };
+                // hilo de miniaturas: vive mientras la ventana está abierta (se corta al soltar el Sender)
+                let (tx, rx) = std::sync::mpsc::channel::<(u64, usize, PathBuf)>();
+                start_thumb_thread(hwnd, rx);
+                self.gallery = Some(Gallery {
+                    hwnd,
+                    logo: load_icon_size(hinst, 1, sc(96)),
+                    fonts,
+                    items: Vec::new(),
+                    view: Vec::new(),
+                    nav: 0,
+                    counts: [0; 4],
+                    total: 0,
+                    sel: None,
+                    hover: Hit::None,
+                    scroll: 0,
+                    content_h: 0,
+                    page_h: 0,
+                    cols: 1,
+                    hits: Vec::new(),
+                    visible: Vec::new(),
+                    gen: 1,
+                    tx: Some(tx),
+                    drag: None,
+                    tracking: false,
+                });
                 self.fill_gallery();
+                // refresco del reloj de grabación y del estado (solo mientras la ventana está abierta)
+                SetTimer(Some(hwnd), 1, 1000, None);
                 let _ = ShowWindow(hwnd, SW_SHOW);
                 let _ = SetForegroundWindow(hwnd);
             }
         }
 
-        fn layout_gallery(&self) {
-            let Some(g) = &self.gallery else { return };
-            unsafe {
-                let mut r = RECT::default();
-                let _ = GetClientRect(g.hwnd, &mut r);
-                let dpi = windows::Win32::UI::HiDpi::GetDpiForWindow(g.hwnd).max(96) as i32;
-                let sc = |v: i32| v * dpi / 96;
-                let (m, bh) = (sc(12), sc(34));
-                let top = header_height(dpi) + m;
-                let mut x = m;
-                for b in &g.buttons {
-                    let mut t = [0u16; 64];
-                    let n = GetWindowTextW(*b, &mut t).max(0);
-                    let bw = sc(28) + n * sc(7);
-                    let _ = MoveWindow(*b, x, top, bw, bh, true);
-                    x += bw + sc(8);
-                }
-                let ltop = top + bh + m;
-                let _ = MoveWindow(g.list, m, ltop, r.right - 2 * m, (r.bottom - ltop - m).max(0), true);
-            }
-        }
-
-        /// Lee la carpeta de clips (solo nombres y fechas) y pide las miniaturas en segundo plano.
+        /// Lee la carpeta de clips (solo nombres, tamaños y fechas). Las miniaturas se piden al dibujar.
         fn fill_gallery(&mut self) {
             let folder = self.cfg.folder.clone();
-            let status = self.status();
-            let keys = format!(
-                "{} guardar clip   ·   {} grabar / frenar   ·   {} captura",
-                hk(self.cfg.clip),
-                hk(self.cfg.rec),
-                hk(self.cfg.shot)
-            );
             let Some(g) = self.gallery.as_mut() else { return };
             let mut files: Vec<(std::time::SystemTime, PathBuf, u64)> = fs::read_dir(&folder)
                 .map(|rd| {
                     rd.flatten()
-                        .filter(|e| e.path().extension().is_some_and(|x| x == "mp4" || x == "png"))
+                        .filter(|e| e.path().extension().is_some_and(|x| x.eq_ignore_ascii_case("mp4") || x.eq_ignore_ascii_case("png")))
                         .filter_map(|e| {
                             let m = e.metadata().ok()?;
                             Some((m.modified().ok()?, e.path(), m.len()))
@@ -2326,65 +2269,70 @@ mod app {
                 })
                 .unwrap_or_default();
             files.sort_by_key(|f| std::cmp::Reverse(f.0));
-            files.truncate(2000);
-            let total: u64 = files.iter().map(|f| f.2).sum();
-            g.header = if files.is_empty() {
-                format!("{status}   ·   Todavía no hay clips: abrí un juego y apretá {}", hk(self.cfg.clip))
-            } else {
-                format!("{status}   ·   {} archivos · {}", files.len(), logic::fmt_size(total))
-            };
-            g.sub = keys;
-            unsafe {
-                let dpi = windows::Win32::UI::HiDpi::GetDpiForWindow(g.hwnd).max(96) as i32;
-                let (tw, th) = thumb_size(dpi);
-                send(g.list, LVM_DELETEALLITEMS, 0, 0);
-                let _ = ImageList_Remove(g.il, -1);
-                add_placeholders(g.il, tw, th, g.logo);
-                for (i, (_, path, len)) in files.iter().enumerate() {
+            files.truncate(3000);
+            let sel_path = g.sel.and_then(|i| g.items.get(i)).map(|it| it.path.clone());
+            g.free_thumbs();
+            g.gen += 1;
+            g.items = files
+                .into_iter()
+                .map(|(_, path, len)| {
                     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                     let (kind, date) = logic::describe_file(&name);
-                    let label = if date.is_empty() { format!("{name}\n{}", logic::fmt_size(*len)) } else { format!("{kind} · {date}\n{}", logic::fmt_size(*len)) };
-                    let tn = wide(&label);
-                    let item = LVITEMW { mask: LVIF_TEXT | LVIF_IMAGE, iItem: i as i32, pszText: PWSTR(tn.as_ptr() as _), iImage: 0, ..Default::default() };
-                    send(g.list, LVM_INSERTITEMW, 0, &item as *const _ as isize);
-                }
-                let mut hr = RECT::default();
-                let _ = GetClientRect(g.hwnd, &mut hr);
-                hr.bottom = header_height(dpi);
-                let _ = InvalidateRect(Some(g.hwnd), Some(&hr), false);
-                start_thumbnails(g.hwnd, files.iter().map(|f| f.1.clone()).collect(), tw, th);
+                    let k = match kind {
+                        "Clip" => 0,
+                        "Grabación" => 1,
+                        "Captura" => 2,
+                        _ => 3,
+                    };
+                    let title = if date.is_empty() { name.clone() } else { format!("{kind} del {date}") };
+                    Item { path, kind: k, title, size: len, dur: None, thumb: None, asked: false }
+                })
+                .collect();
+            g.counts = [0; 4];
+            for it in &g.items {
+                g.counts[it.kind as usize] += 1;
             }
-            g.files = files.into_iter().map(|f| f.1).collect();
-        }
-
-        /// Llega una miniatura del hilo de fondo.
-        fn add_thumb(&mut self, idx: usize, gen: u64, hbm: HBITMAP) {
+            g.total = g.items.iter().map(|i| i.size).sum();
+            g.sel = sel_path.and_then(|p| g.items.iter().position(|i| i.path == p));
+            g.rebuild_view();
             unsafe {
-                if let Some(g) = &self.gallery {
-                    if gen == THUMB_GEN.load(Ordering::Relaxed) {
-                        let img = ImageList_Add(g.il, hbm, None);
-                        if img >= 0 {
-                            let item = LVITEMW { mask: LVIF_IMAGE, iItem: idx as i32, iImage: img, ..Default::default() };
-                            send(g.list, LVM_SETITEMW, 0, &item as *const _ as isize);
-                        }
-                    }
-                }
-                let _ = DeleteObject(hbm.into());
+                let _ = InvalidateRect(Some(g.hwnd), None, false);
             }
         }
 
         fn selected_file(&self) -> Option<PathBuf> {
             let g = self.gallery.as_ref()?;
-            let i = send(g.list, LVM_GETNEXTITEM, usize::MAX, LVNI_SELECTED as isize);
-            g.files.get(usize::try_from(i).ok()?).cloned()
+            g.items.get(g.sel?).map(|i| i.path.clone())
         }
 
         fn gallery_cmd(&mut self, id: usize) {
-            if id == 206 {
-                if let Some(d) = self.out_dir() {
-                    let _ = Command::new("explorer.exe").arg(d).spawn();
+            match id {
+                206 => {
+                    if let Some(d) = self.out_dir() {
+                        let _ = Command::new("explorer.exe").arg(d).spawn();
+                    }
+                    return;
                 }
-                return;
+                207 => {
+                    self.fill_gallery();
+                    return;
+                }
+                // prueba automática: elegir la tarjeta N de lo que se ve
+                210..=239 => {
+                    if let Some(g) = self.gallery.as_mut() {
+                        g.sel = g.view.get(id - 210).copied();
+                        g.redraw();
+                    }
+                    return;
+                }
+                // prueba automática: elegir la sección
+                240..=243 => {
+                    if let Some(g) = self.gallery.as_mut() {
+                        g.set_nav((id - 240) as u8);
+                    }
+                    return;
+                }
+                _ => {}
             }
             let Some(f) = self.selected_file() else {
                 self.notify("Elegí un clip de la lista primero.", false);
@@ -2434,20 +2382,729 @@ mod app {
                 _ => {}
             }
         }
+
+        /// Clic en la ventana. Lo que abre menús se devuelve para hacerlo fuera del préstamo de App.
+        fn gallery_click(&mut self, x: i32, y: i32, double: bool) -> Option<Outside> {
+            let g = self.gallery.as_mut()?;
+            let hit = g.hit_at(x, y);
+            match hit {
+                Hit::Nav(n) => g.set_nav(n),
+                Hit::Card(i) => {
+                    g.sel = Some(i);
+                    g.redraw();
+                    if double {
+                        self.gallery_cmd(201);
+                    }
+                }
+                Hit::Play(i) => {
+                    g.sel = Some(i);
+                    g.redraw();
+                    self.gallery_cmd(201);
+                }
+                Hit::Act(i, cmd) => {
+                    g.sel = Some(i);
+                    g.redraw();
+                    self.gallery_cmd(cmd);
+                }
+                Hit::Btn(0) => {
+                    self.toggle_manual_screen();
+                    self.redraw_gallery();
+                }
+                Hit::Btn(1) => self.save_clip(),
+                Hit::Btn(2) => self.gallery_cmd(206),
+                Hit::Btn(_) => return Some(Outside::Menu),
+                Hit::Bar => {
+                    g.drag = Some(y);
+                    g.drag_to(y);
+                    unsafe {
+                        SetCapture(g.hwnd);
+                    }
+                }
+                Hit::None => {
+                    if g.sel.take().is_some() {
+                        g.redraw();
+                    }
+                }
+            }
+            None
+        }
+
+        fn redraw_gallery(&self) {
+            if let Some(g) = &self.gallery {
+                g.redraw();
+            }
+        }
+
+        /// Llega una miniatura (y la duración del video) del hilo de fondo.
+        fn add_thumb(&mut self, gen: u64, idx: usize, bmp: HBITMAP, dur: Option<u32>) {
+            let Some(g) = self.gallery.as_mut() else {
+                unsafe {
+                    let _ = DeleteObject(bmp.into());
+                }
+                return;
+            };
+            match g.items.get_mut(idx) {
+                Some(it) if gen == g.gen && it.thumb.is_none() => {
+                    it.thumb = (!bmp.is_invalid()).then_some(bmp);
+                    it.dur = dur;
+                }
+                _ => unsafe {
+                    let _ = DeleteObject(bmp.into());
+                    return;
+                },
+            }
+            g.evict_thumbs();
+            g.redraw();
+        }
+
+        fn paint_gallery(&mut self, dc: HDC, w: i32, h: i32) {
+            let status = self.status();
+            let rec = self.manual.as_ref().map(|m| logic::fmt_elapsed(m.t0.elapsed().as_secs()));
+            let live = self.manual.is_some() || (self.rec.child.is_some() && self.rec.good);
+            let keys = (hk(self.cfg.clip), hk(self.cfg.rec), hk(self.cfg.shot));
+            let secs = self.cfg.secs;
+            let Some(g) = self.gallery.as_mut() else { return };
+            unsafe { g.paint(dc, w, h, &status, rec, live, keys, secs) };
+        }
     }
 
-    // ---- aspecto de la ventana (colores, encabezado, botones, miniaturas) ----
+    // ---- ventana "Mis clips": dibujada a mano (estilo de las apps de clips), sin controles ----
 
-    const BG_COLOR: u32 = 0x001E_1618; // RGB(24, 22, 30) en formato COLORREF (0x00BBGGRR)
+    struct Fonts {
+        brand: HFONT,
+        h1: HFONT,
+        body: HFONT,
+        bold: HFONT,
+        small: HFONT,
+        badge: HFONT,
+        icon: HFONT,
+        icon_big: HFONT,
+    }
+
+    struct Item {
+        path: PathBuf,
+        /// 0 clip, 1 grabación, 2 captura, 3 otro video
+        kind: u8,
+        title: String,
+        size: u64,
+        dur: Option<u32>,
+        thumb: Option<HBITMAP>,
+        asked: bool,
+    }
+
+    #[derive(Clone, Copy, PartialEq, Debug)]
+    enum Hit {
+        None,
+        Nav(u8),
+        Card(usize),
+        Play(usize),
+        Act(usize, usize),
+        /// 0 grabar, 1 guardar clip, 2 carpeta, 3 ajustes
+        Btn(u8),
+        Bar,
+    }
+
+    enum Outside {
+        Menu,
+    }
+
+    struct Gallery {
+        hwnd: HWND,
+        logo: HICON,
+        fonts: Fonts,
+        items: Vec<Item>,
+        /// índices de `items` de la sección elegida
+        view: Vec<usize>,
+        nav: u8,
+        counts: [usize; 4],
+        total: u64,
+        sel: Option<usize>,
+        hover: Hit,
+        scroll: i32,
+        content_h: i32,
+        page_h: i32,
+        cols: usize,
+        hits: Vec<(RECT, Hit)>,
+        visible: Vec<usize>,
+        gen: u64,
+        tx: Option<std::sync::mpsc::Sender<(u64, usize, PathBuf)>>,
+        drag: Option<i32>,
+        tracking: bool,
+    }
+
+    const NAV: [(&str, u16); 4] = [("Todo", 0xE8A9), ("Clips", 0xE714), ("Grabaciones", 0xE7C8), ("Capturas", 0xEB9F)];
+    const THUMB_W: i32 = 320;
+    const THUMB_H: i32 = 180;
+    /// miniaturas en memoria como máximo (las que no se ven se sueltan)
+    const THUMB_CAP: usize = 36;
+
+    const fn rgb(r: u32, g: u32, b: u32) -> u32 {
+        r | (g << 8) | (b << 16)
+    }
+    const BG_COLOR: u32 = rgb(15, 14, 21);
+    const SIDE: u32 = rgb(22, 20, 31);
+    const CARD: u32 = rgb(30, 27, 41);
+    const CARD_HOVER: u32 = rgb(40, 36, 55);
+    const NAV_HOVER: u32 = rgb(33, 30, 45);
+    const NAV_SEL: u32 = rgb(44, 37, 60);
+    const TEXT: u32 = rgb(246, 244, 252);
+    const MUTED: u32 = rgb(150, 145, 172);
+    const ORANGE: u32 = rgb(255, 138, 0);
+    const PINK: u32 = rgb(255, 46, 110);
+    const RED: u32 = rgb(240, 52, 72);
+    const BLUE: u32 = rgb(64, 150, 255);
+    const GREEN: u32 = rgb(46, 214, 120);
+    const THUMB_BG: u32 = rgb(24, 22, 33);
     const WM_THUMB: u32 = WM_APP + 10;
-    static THUMB_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-    fn header_height(dpi: i32) -> i32 {
-        84 * dpi / 96
+    impl Gallery {
+        fn redraw(&self) {
+            unsafe {
+                let _ = InvalidateRect(Some(self.hwnd), None, false);
+            }
+        }
+
+        fn rebuild_view(&mut self) {
+            self.view = (0..self.items.len())
+                .filter(|&i| match self.nav {
+                    0 => true,
+                    1 => matches!(self.items[i].kind, 0 | 3),
+                    n => self.items[i].kind == n - 1,
+                })
+                .collect();
+        }
+
+        fn set_nav(&mut self, n: u8) {
+            if n != self.nav {
+                self.nav = n;
+                self.scroll = 0;
+                self.rebuild_view();
+            }
+            self.redraw();
+        }
+
+        fn free_thumbs(&mut self) {
+            for it in &mut self.items {
+                if let Some(b) = it.thumb.take() {
+                    unsafe {
+                        let _ = DeleteObject(b.into());
+                    }
+                }
+                it.asked = false;
+            }
+        }
+
+        /// Si hay demasiadas miniaturas en memoria, se sueltan las que no están a la vista.
+        fn evict_thumbs(&mut self) {
+            let mut have: Vec<usize> = (0..self.items.len()).filter(|&i| self.items[i].thumb.is_some()).collect();
+            if have.len() <= THUMB_CAP {
+                return;
+            }
+            let center = self.visible.first().copied().unwrap_or(0) as i64;
+            have.retain(|i| !self.visible.contains(i));
+            have.sort_by_key(|&i| std::cmp::Reverse((i as i64 - center).abs()));
+            let extra = (have.len() + self.visible.len()).saturating_sub(THUMB_CAP);
+            for &i in have.iter().take(extra) {
+                if let Some(b) = self.items[i].thumb.take() {
+                    unsafe {
+                        let _ = DeleteObject(b.into());
+                    }
+                }
+                self.items[i].asked = false;
+            }
+        }
+
+        fn hit_at(&self, x: i32, y: i32) -> Hit {
+            self.hits
+                .iter()
+                .rev()
+                .find(|(r, _)| x >= r.left && x < r.right && y >= r.top && y < r.bottom)
+                .map_or(Hit::None, |h| h.1)
+        }
+
+        fn max_scroll(&self) -> i32 {
+            (self.content_h - self.page_h).max(0)
+        }
+
+        fn scroll_by(&mut self, dy: i32) {
+            let s = (self.scroll + dy).clamp(0, self.max_scroll());
+            if s != self.scroll {
+                self.scroll = s;
+                self.redraw();
+            }
+        }
+
+        /// Arrastrar la barra de desplazamiento.
+        fn drag_to(&mut self, y: i32) {
+            let Some(bar) = self.hits.iter().find(|h| h.1 == Hit::Bar).map(|h| h.0) else { return };
+            let track = (bar.bottom - bar.top).max(1);
+            let f = ((y - bar.top) as f32 / track as f32).clamp(0.0, 1.0);
+            let s = (f * self.max_scroll() as f32) as i32;
+            if s != self.scroll {
+                self.scroll = s;
+                self.redraw();
+            }
+        }
+
+        /// Asegura que la tarjeta elegida se vea (al moverse con las flechas).
+        fn reveal_sel(&mut self) {
+            let Some(sel) = self.sel else { return };
+            let Some(pos) = self.view.iter().position(|&i| i == sel) else { return };
+            let Some(card) = self.hits.iter().find(|h| matches!(h.1, Hit::Card(_))).map(|h| h.0) else { return };
+            let ch = card.bottom - card.top;
+            let gap = ch / 10;
+            let row = (pos / self.cols.max(1)) as i32;
+            let top = row * (ch + gap);
+            if top < self.scroll {
+                self.scroll = top;
+            } else if top + ch > self.scroll + self.page_h {
+                self.scroll = (top + ch - self.page_h).min(self.max_scroll());
+            }
+        }
+
+        fn key(&mut self, vk: u16) -> Option<usize> {
+            let n = self.view.len();
+            let pos = self.sel.and_then(|s| self.view.iter().position(|&i| i == s));
+            let cols = self.cols.max(1);
+            let next = match (vk, pos) {
+                (_, _) if n == 0 => None,
+                (0x25, Some(p)) => Some(p.saturating_sub(1)),
+                (0x27, Some(p)) => Some((p + 1).min(n - 1)),
+                (0x26, Some(p)) => Some(p.saturating_sub(cols)),
+                (0x28, Some(p)) => Some((p + cols).min(n - 1)),
+                (0x24, _) => Some(0),
+                (0x23, _) => Some(n - 1),
+                (0x25..=0x28, None) => Some(0),
+                _ => None,
+            };
+            if let Some(p) = next {
+                self.sel = Some(self.view[p]);
+                self.reveal_sel();
+                self.redraw();
+                return None;
+            }
+            match vk {
+                0x0D => Some(201),
+                0x2E => Some(205),
+                0x74 => Some(207),
+                0x21 => {
+                    self.scroll_by(-self.page_h * 9 / 10);
+                    None
+                }
+                0x22 => {
+                    self.scroll_by(self.page_h * 9 / 10);
+                    None
+                }
+                _ => None,
+            }
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        unsafe fn paint(&mut self, dc: HDC, w: i32, h: i32, status: &str, rec: Option<String>, live: bool, keys: (String, String, String), secs: u32) {
+            let dpi = windows::Win32::UI::HiDpi::GetDpiForWindow(self.hwnd).max(96) as i32;
+            let s = |v: i32| v * dpi / 96;
+            self.hits.clear();
+            SetBkMode(dc, TRANSPARENT);
+            fill(dc, rc(0, 0, w, h), BG_COLOR);
+
+            // ---------- barra lateral ----------
+            let sw = s(224);
+            fill(dc, rc(0, 0, sw, h), SIDE);
+            let _ = DrawIconEx(dc, s(20), s(20), self.logo, s(40), s(40), 0, None, DI_NORMAL);
+            text(dc, "Jugadón", rc(s(68), s(16), sw, s(48)), self.fonts.brand, TEXT, DT_SINGLELINE | DT_VCENTER);
+            text(dc, "tus mejores jugadas", rc(s(69), s(44), sw, s(62)), self.fonts.small, MUTED, DT_SINGLELINE | DT_VCENTER);
+            let mut y = s(88);
+            text(dc, "BIBLIOTECA", rc(s(24), y, sw, y + s(20)), self.fonts.badge, MUTED, DT_SINGLELINE | DT_VCENTER);
+            y += s(26);
+            for (i, (name, glyph)) in NAV.iter().enumerate() {
+                let r = rc(s(12), y, sw - s(12), y + s(40));
+                let selected = self.nav == i as u8;
+                let hover = self.hover == Hit::Nav(i as u8);
+                if selected {
+                    round(dc, r, s(10), NAV_SEL);
+                    grad_round(dc, rc(r.left, r.top + s(9), r.left + s(4), r.bottom - s(9)), s(4), ORANGE, PINK, true);
+                } else if hover {
+                    round(dc, r, s(10), NAV_HOVER);
+                }
+                let c = if selected { TEXT } else { rgb(200, 196, 220) };
+                glyph_at(dc, *glyph, rc(r.left + s(14), r.top, r.left + s(40), r.bottom), self.fonts.icon, if selected { ORANGE } else { c });
+                text(dc, name, rc(r.left + s(46), r.top, r.right, r.bottom), if selected { self.fonts.bold } else { self.fonts.body }, c, DT_SINGLELINE | DT_VCENTER);
+                let n = if i == 0 { self.items.len() } else if i == 1 { self.counts[0] + self.counts[3] } else { self.counts[i - 1] };
+                let ns = n.to_string();
+                let pw = s(14) + ns.len() as i32 * s(7);
+                let pr = rc(r.right - s(12) - pw, r.top + s(10), r.right - s(12), r.bottom - s(10));
+                round(dc, pr, s(10), if selected { rgb(70, 58, 92) } else { rgb(40, 36, 54) });
+                text(dc, &ns, pr, self.fonts.small, if selected { TEXT } else { MUTED }, DT_SINGLELINE | DT_VCENTER | DT_CENTER);
+                self.hits.push((r, Hit::Nav(i as u8)));
+                y += s(44);
+            }
+
+            // botones grandes y estado, desde abajo
+            let bx = (s(16), sw - s(16));
+            let mut by = h - s(16);
+            // tarjeta de estado
+            let card = rc(bx.0, by - s(74), bx.1, by);
+            round(dc, card, s(12), rgb(30, 27, 42));
+            let dot = if rec.is_some() {
+                RED
+            } else if live {
+                GREEN
+            } else {
+                rgb(120, 116, 140)
+            };
+            let dr = rc(card.left + s(14), card.top + s(17), card.left + s(24), card.top + s(27));
+            ellipse(dc, dr, dot);
+            let head = if rec.is_some() {
+                "Grabando"
+            } else if live {
+                "Clips activos"
+            } else {
+                "En espera"
+            };
+            text(dc, head, rc(card.left + s(32), card.top + s(10), card.right - s(8), card.top + s(34)), self.fonts.bold, TEXT, DT_SINGLELINE | DT_VCENTER);
+            let st = status.trim_start_matches("● ");
+            text(dc, st, rc(card.left + s(14), card.top + s(34), card.right - s(10), card.bottom - s(6)), self.fonts.small, MUTED, DT_WORDBREAK | DT_END_ELLIPSIS);
+            by = card.top - s(12);
+            // ajustes y carpeta
+            for (b, glyph, label) in [(3u8, 0xE713u16, "Ajustes"), (2, 0xE838, "Abrir carpeta")] {
+                let r = rc(bx.0, by - s(38), bx.1, by);
+                let hover = self.hover == Hit::Btn(b);
+                if hover {
+                    round(dc, r, s(10), NAV_HOVER);
+                }
+                glyph_at(dc, glyph, rc(r.left + s(12), r.top, r.left + s(38), r.bottom), self.fonts.icon, rgb(200, 196, 220));
+                text(dc, label, rc(r.left + s(44), r.top, r.right, r.bottom), self.fonts.body, rgb(220, 216, 236), DT_SINGLELINE | DT_VCENTER);
+                self.hits.push((r, Hit::Btn(b)));
+                by = r.top - s(2);
+            }
+            by -= s(10);
+            // guardar clip
+            let r = rc(bx.0, by - s(44), bx.1, by);
+            let hover = self.hover == Hit::Btn(1);
+            round(dc, r, s(12), if hover { rgb(58, 50, 80) } else { rgb(44, 38, 62) });
+            glyph_at(dc, 0xE74E, rc(r.left + s(14), r.top, r.left + s(40), r.bottom), self.fonts.icon, ORANGE);
+            text(dc, "Guardar clip", rc(r.left + s(46), r.top, r.right, r.bottom), self.fonts.bold, TEXT, DT_SINGLELINE | DT_VCENTER);
+            text(dc, &keys.0, rc(r.left, r.top, r.right - s(14), r.bottom), self.fonts.small, MUTED, DT_SINGLELINE | DT_VCENTER | DT_RIGHT);
+            self.hits.push((r, Hit::Btn(1)));
+            by = r.top - s(10);
+            // grabar / frenar (el botón principal)
+            let r = rc(bx.0, by - s(50), bx.1, by);
+            let hover = self.hover == Hit::Btn(0);
+            match &rec {
+                Some(t) => {
+                    round(dc, r, s(14), if hover { rgb(255, 80, 96) } else { RED });
+                    let sq = rc(r.left + s(18), r.top + s(19), r.left + s(30), r.top + s(31));
+                    round(dc, sq, s(3), TEXT);
+                    text(dc, "Frenar", rc(r.left + s(42), r.top, r.right, r.bottom), self.fonts.bold, TEXT, DT_SINGLELINE | DT_VCENTER);
+                    text(dc, t, rc(r.left, r.top, r.right - s(16), r.bottom), self.fonts.bold, TEXT, DT_SINGLELINE | DT_VCENTER | DT_RIGHT);
+                }
+                None => {
+                    let (a, b) = if hover { (rgb(255, 160, 40), rgb(255, 70, 130)) } else { (ORANGE, PINK) };
+                    grad_round(dc, r, s(14), a, b, false);
+                    ellipse(dc, rc(r.left + s(18), r.top + s(18), r.left + s(32), r.top + s(32)), TEXT);
+                    text(dc, "Grabar pantalla", rc(r.left + s(42), r.top, r.right, r.bottom), self.fonts.bold, TEXT, DT_SINGLELINE | DT_VCENTER);
+                    text(dc, &keys.1, rc(r.left, r.top, r.right - s(16), r.bottom), self.fonts.small, rgb(255, 236, 226), DT_SINGLELINE | DT_VCENTER | DT_RIGHT);
+                }
+            }
+            self.hits.push((r, Hit::Btn(0)));
+
+            // ---------- contenido ----------
+            let cx0 = sw + s(32);
+            let cx1 = w - s(28);
+            let title = NAV[self.nav as usize].0;
+            text(dc, if self.nav == 0 { "Mis clips" } else { title }, rc(cx0, s(18), cx1, s(56)), self.fonts.h1, TEXT, DT_SINGLELINE | DT_VCENTER);
+            let n = self.view.len();
+            let size: u64 = self.view.iter().map(|&i| self.items[i].size).sum();
+            let sub = format!(
+                "{n} {}  ·  {}     {} guarda los últimos {}  ·  {} graba  ·  {} captura",
+                if n == 1 { "archivo" } else { "archivos" },
+                logic::fmt_size(size),
+                keys.0,
+                logic::fmt_elapsed(secs as u64),
+                keys.1,
+                keys.2
+            );
+            text(dc, &sub, rc(cx0, s(56), cx1, s(78)), self.fonts.body, MUTED, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+            let top = s(96);
+            let page = rc(cx0, top, cx1, h);
+            self.page_h = (h - top).max(1);
+            self.visible.clear();
+
+            if self.view.is_empty() {
+                self.content_h = 0;
+                self.scroll = 0;
+                let mid = (cx0 + cx1) / 2;
+                let cy = top + (h - top) / 2 - s(90);
+                let _ = DrawIconEx(dc, mid - s(48), cy, self.logo, s(96), s(96), 0, None, DI_NORMAL);
+                let (t1, t2) = match self.nav {
+                    3 => ("Todavía no hay capturas", format!("Apretá {} y se guarda una foto de la pantalla.", keys.2)),
+                    2 => ("Todavía no hay grabaciones", format!("Apretá {} para empezar a grabar y de nuevo {} para guardar.", keys.1, keys.1)),
+                    _ => ("Todavía no hay clips", format!("Abrí un juego y apretá {}: se guardan los últimos {}.", keys.0, logic::fmt_elapsed(secs as u64))),
+                };
+                text(dc, t1, rc(cx0, cy + s(108), cx1, cy + s(140)), self.fonts.h1, TEXT, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+                text(dc, &t2, rc(cx0, cy + s(142), cx1, cy + s(166)), self.fonts.body, MUTED, DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_END_ELLIPSIS);
+                return;
+            }
+
+            // grilla de tarjetas
+            let gap = s(18);
+            let avail = (cx1 - cx0).max(s(200));
+            let cols = ((avail + gap) / (s(220) + gap)).max(1) as usize;
+            self.cols = cols;
+            let cw = (avail - gap * (cols as i32 - 1)) / cols as i32;
+            let th = cw * 9 / 16;
+            let ch = th + s(60);
+            let rows = n.div_ceil(cols) as i32;
+            self.content_h = rows * (ch + gap) + s(8);
+            self.scroll = self.scroll.clamp(0, self.max_scroll());
+            let rgn = CreateRectRgn(page.left - s(8), page.top, page.right + s(8), page.bottom);
+            SelectClipRgn(dc, Some(rgn));
+            let mut asks = Vec::new();
+            for (pos, &idx) in self.view.iter().enumerate() {
+                let (row, col) = ((pos / cols) as i32, (pos % cols) as i32);
+                let x = cx0 + col * (cw + gap);
+                let y = top + row * (ch + gap) - self.scroll;
+                if y + ch < top || y > h {
+                    continue;
+                }
+                self.visible.push(idx);
+                let it = &self.items[idx];
+                if it.thumb.is_none() && !it.asked {
+                    asks.push(idx);
+                }
+                let r = rc(x, y, x + cw, y + ch);
+                let hovered = matches!(self.hover, Hit::Card(i) | Hit::Play(i) | Hit::Act(i, _) if i == idx);
+                let selected = self.sel == Some(idx);
+                // tarjeta
+                if selected {
+                    grad_round(dc, rc(r.left - s(3), r.top - s(3), r.right + s(3), r.bottom + s(3)), s(16), ORANGE, PINK, false);
+                }
+                round(dc, r, s(14), if hovered || selected { CARD_HOVER } else { CARD });
+                // miniatura (esquinas de arriba redondeadas)
+                let tr = rc(r.left, r.top, r.right, r.top + th);
+                let clip = CreateRoundRectRgn(tr.left, tr.top, tr.right + 1, tr.bottom + s(16), s(14), s(14));
+                let page_rgn = CreateRectRgn(page.left - s(8), page.top, page.right + s(8), page.bottom);
+                let _ = CombineRgn(Some(clip), Some(clip), Some(page_rgn), RGN_AND);
+                let _ = CombineRgn(Some(clip), Some(clip), Some(CreateRectRgn(tr.left, tr.top, tr.right, tr.bottom)), RGN_AND);
+                SelectClipRgn(dc, Some(clip));
+                fill(dc, tr, THUMB_BG);
+                match it.thumb {
+                    Some(b) => blit_cover(dc, b, tr),
+                    None => {
+                        let sz = th / 3;
+                        let _ = DrawIconEx(dc, (tr.left + tr.right - sz) / 2, (tr.top + tr.bottom - sz) / 2, self.logo, sz, sz, 0, None, DI_NORMAL);
+                    }
+                }
+                if hovered {
+                    shade(dc, tr, 0, 70);
+                }
+                // etiqueta del tipo
+                let (label, color) = match it.kind {
+                    0 => ("CLIP", ORANGE),
+                    1 => ("GRABACIÓN", PINK),
+                    2 => ("CAPTURA", BLUE),
+                    _ => ("VIDEO", rgb(140, 120, 255)),
+                };
+                let lw = s(16) + label.chars().count() as i32 * s(7);
+                let lr = rc(tr.left + s(10), tr.top + s(10), tr.left + s(10) + lw, tr.top + s(30));
+                round(dc, lr, s(10), color);
+                text(dc, label, lr, self.fonts.badge, TEXT, DT_SINGLELINE | DT_VCENTER | DT_CENTER);
+                // duración
+                if let Some(d) = it.dur {
+                    let ds = logic::fmt_elapsed(d as u64);
+                    let dw = s(14) + ds.len() as i32 * s(7);
+                    let dr = rc(tr.right - s(10) - dw, tr.bottom - s(32), tr.right - s(10), tr.bottom - s(10));
+                    shade_round(dc, dr, s(10), 0, 190);
+                    text(dc, &ds, dr, self.fonts.bold, TEXT, DT_SINGLELINE | DT_VCENTER | DT_CENTER);
+                }
+                SelectClipRgn(dc, Some(rgn));
+                let _ = DeleteObject(clip.into());
+                let _ = DeleteObject(page_rgn.into());
+                self.hits.push((r, Hit::Card(idx)));
+                if hovered {
+                    // botón ▶ en el medio y acciones rápidas arriba a la derecha
+                    let pr = s(26);
+                    let (mx, my) = ((tr.left + tr.right) / 2, (tr.top + tr.bottom) / 2);
+                    let play = rc(mx - pr, my - pr, mx + pr, my + pr);
+                    let ph = self.hover == Hit::Play(idx);
+                    ellipse(dc, rc(play.left - s(3), play.top - s(3), play.right + s(3), play.bottom + s(3)), if ph { TEXT } else { rgb(255, 200, 150) });
+                    grad_ellipse(dc, play, ORANGE, PINK);
+                    glyph_at(dc, 0xE768, rc(play.left + s(3), play.top, play.right + s(3), play.bottom), self.fonts.icon_big, TEXT);
+                    self.hits.push((play, Hit::Play(idx)));
+                    let mut ax = tr.right - s(10);
+                    for (cmd, glyph) in [(205usize, 0xE74Du16), (203, 0xE8C8), (202, 0xE72D)] {
+                        let ar = rc(ax - s(32), tr.top + s(8), ax, tr.top + s(40));
+                        let ah = self.hover == Hit::Act(idx, cmd);
+                        if ah {
+                            ellipse(dc, ar, if cmd == 205 { RED } else { ORANGE });
+                        } else {
+                            shade_round(dc, ar, s(32), 0, 170);
+                        }
+                        glyph_at(dc, glyph, ar, self.fonts.icon, TEXT);
+                        self.hits.push((ar, Hit::Act(idx, cmd)));
+                        ax -= s(38);
+                    }
+                }
+                // textos
+                text(dc, &it.title, rc(r.left + s(14), tr.bottom + s(8), r.right - s(12), tr.bottom + s(30)), self.fonts.bold, TEXT, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+                let info = match it.dur {
+                    Some(d) => format!("{}  ·  {}", logic::fmt_elapsed(d as u64), logic::fmt_size(it.size)),
+                    None => logic::fmt_size(it.size),
+                };
+                text(dc, &info, rc(r.left + s(14), tr.bottom + s(30), r.right - s(12), tr.bottom + s(50)), self.fonts.small, MUTED, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+            }
+            SelectClipRgn(dc, None);
+            let _ = DeleteObject(rgn.into());
+            // barra de desplazamiento finita
+            if self.max_scroll() > 0 {
+                let track = rc(w - s(12), top + s(4), w - s(6), h - s(8));
+                let th_ = ((track.bottom - track.top) * self.page_h / self.content_h.max(1)).max(s(40));
+                let ty = track.top + (track.bottom - track.top - th_) * self.scroll / self.max_scroll().max(1);
+                let active = self.hover == Hit::Bar || self.drag.is_some();
+                round(dc, rc(track.left, ty, track.right, ty + th_), s(6), if active { ORANGE } else { rgb(70, 64, 92) });
+                self.hits.push((rc(track.left - s(6), track.top, track.right + s(4), track.bottom), Hit::Bar));
+            }
+            for idx in asks {
+                self.items[idx].asked = true;
+                if let Some(tx) = &self.tx {
+                    let _ = tx.send((self.gen, idx, self.items[idx].path.clone()));
+                }
+            }
+        }
     }
 
-    fn thumb_size(dpi: i32) -> (i32, i32) {
-        (192 * dpi / 96, 108 * dpi / 96)
+    impl Drop for Gallery {
+        fn drop(&mut self) {
+            self.tx = None;
+            self.free_thumbs();
+            unsafe {
+                for f in [self.fonts.brand, self.fonts.h1, self.fonts.body, self.fonts.bold, self.fonts.small, self.fonts.badge, self.fonts.icon, self.fonts.icon_big] {
+                    let _ = DeleteObject(f.into());
+                }
+                let _ = DestroyIcon(self.logo);
+            }
+        }
+    }
+
+    // ---- ayudas de dibujo (GDI) ----
+
+    fn rc(l: i32, t: i32, r: i32, b: i32) -> RECT {
+        RECT { left: l, top: t, right: r, bottom: b }
+    }
+
+    unsafe fn fill(dc: HDC, r: RECT, c: u32) {
+        let b = CreateSolidBrush(COLORREF(c));
+        FillRect(dc, &r, b);
+        let _ = DeleteObject(b.into());
+    }
+
+    unsafe fn round(dc: HDC, r: RECT, rad: i32, c: u32) {
+        let b = CreateSolidBrush(COLORREF(c));
+        let p = CreatePen(PS_SOLID, 1, COLORREF(c));
+        let ob = SelectObject(dc, b.into());
+        let op = SelectObject(dc, p.into());
+        let _ = RoundRect(dc, r.left, r.top, r.right, r.bottom, rad, rad);
+        SelectObject(dc, ob);
+        SelectObject(dc, op);
+        let _ = DeleteObject(b.into());
+        let _ = DeleteObject(p.into());
+    }
+
+    unsafe fn ellipse(dc: HDC, r: RECT, c: u32) {
+        let b = CreateSolidBrush(COLORREF(c));
+        let p = CreatePen(PS_SOLID, 1, COLORREF(c));
+        let ob = SelectObject(dc, b.into());
+        let op = SelectObject(dc, p.into());
+        let _ = Ellipse(dc, r.left, r.top, r.right, r.bottom);
+        SelectObject(dc, ob);
+        SelectObject(dc, op);
+        let _ = DeleteObject(b.into());
+        let _ = DeleteObject(p.into());
+    }
+
+    fn vertex(x: i32, y: i32, c: u32) -> TRIVERTEX {
+        TRIVERTEX { x, y, Red: ((c & 0xFF) << 8) as u16, Green: (c & 0xFF00) as u16, Blue: ((c >> 8) & 0xFF00) as u16, Alpha: 0 }
+    }
+
+    /// Degradé (horizontal, o vertical) recortado a una forma.
+    unsafe fn grad_in(dc: HDC, r: RECT, rgn: HRGN, a: u32, b: u32, vertical: bool) {
+        let mut old = CreateRectRgn(0, 0, 0, 0);
+        let had = GetClipRgn(dc, old) == 1;
+        let _ = ExtSelectClipRgn(dc, Some(rgn), RGN_AND);
+        let v = [vertex(r.left, r.top, a), vertex(r.right, r.bottom, b)];
+        let gr = GRADIENT_RECT { UpperLeft: 0, LowerRight: 1 };
+        let _ = GradientFill(dc, &v, &gr as *const _ as _, 1, if vertical { GRADIENT_FILL_RECT_V } else { GRADIENT_FILL_RECT_H });
+        SelectClipRgn(dc, if had { Some(old) } else { None });
+        let _ = DeleteObject(rgn.into());
+        let _ = DeleteObject(std::mem::take(&mut old).into());
+    }
+
+    unsafe fn grad_round(dc: HDC, r: RECT, rad: i32, a: u32, b: u32, vertical: bool) {
+        grad_in(dc, r, CreateRoundRectRgn(r.left, r.top, r.right + 1, r.bottom + 1, rad, rad), a, b, vertical);
+    }
+
+    unsafe fn grad_ellipse(dc: HDC, r: RECT, a: u32, b: u32) {
+        grad_in(dc, r, CreateEllipticRgn(r.left, r.top, r.right + 1, r.bottom + 1), a, b, false);
+    }
+
+    /// Capa semitransparente de un color (para oscurecer la miniatura o los fondos de las etiquetas).
+    unsafe fn shade(dc: HDC, r: RECT, c: u32, alpha: u8) {
+        let src = CreateCompatibleDC(Some(dc));
+        let bmp = CreateCompatibleBitmap(dc, 1, 1);
+        let old = SelectObject(src, bmp.into());
+        SetPixel(src, 0, 0, COLORREF(c));
+        let bf = BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, BlendFlags: 0, SourceConstantAlpha: alpha, AlphaFormat: 0 };
+        let _ = AlphaBlend(dc, r.left, r.top, r.right - r.left, r.bottom - r.top, src, 0, 0, 1, 1, bf);
+        SelectObject(src, old);
+        let _ = DeleteObject(bmp.into());
+        let _ = DeleteDC(src);
+    }
+
+    unsafe fn shade_round(dc: HDC, r: RECT, rad: i32, c: u32, alpha: u8) {
+        let mut old = CreateRectRgn(0, 0, 0, 0);
+        let had = GetClipRgn(dc, old) == 1;
+        let rgn = CreateRoundRectRgn(r.left, r.top, r.right + 1, r.bottom + 1, rad, rad);
+        let _ = ExtSelectClipRgn(dc, Some(rgn), RGN_AND);
+        shade(dc, r, c, alpha);
+        SelectClipRgn(dc, if had { Some(old) } else { None });
+        let _ = DeleteObject(rgn.into());
+        let _ = DeleteObject(std::mem::take(&mut old).into());
+    }
+
+    unsafe fn text(dc: HDC, s: &str, r: RECT, font: HFONT, c: u32, flags: DRAW_TEXT_FORMAT) {
+        let old = SelectObject(dc, font.into());
+        SetTextColor(dc, COLORREF(c));
+        let mut t: Vec<u16> = s.encode_utf16().collect();
+        let mut r = r;
+        DrawTextW(dc, &mut t, &mut r, flags | DT_NOPREFIX);
+        SelectObject(dc, old);
+    }
+
+    unsafe fn glyph_at(dc: HDC, g: u16, r: RECT, font: HFONT, c: u32) {
+        let old = SelectObject(dc, font.into());
+        SetTextColor(dc, COLORREF(c));
+        let mut t = [g];
+        let mut r = r;
+        DrawTextW(dc, &mut t, &mut r, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX);
+        SelectObject(dc, old);
+    }
+
+    /// Dibuja la miniatura llenando el rectángulo (recorta lo que sobra, sin deformar).
+    unsafe fn blit_cover(dc: HDC, bmp: HBITMAP, r: RECT) {
+        let src = CreateCompatibleDC(Some(dc));
+        let old = SelectObject(src, bmp.into());
+        let (dw, dh) = (r.right - r.left, r.bottom - r.top);
+        let (mut sw, mut sh) = (THUMB_W, THUMB_H);
+        if sw * dh > sh * dw {
+            sw = sh * dw / dh.max(1);
+        } else {
+            sh = sw * dh / dw.max(1);
+        }
+        SetStretchBltMode(dc, HALFTONE);
+        let _ = SetBrushOrgEx(dc, 0, 0, None);
+        let _ = StretchBlt(dc, r.left, r.top, dw, dh, Some(src), (THUMB_W - sw) / 2, (THUMB_H - sh) / 2, sw, sh, SRCCOPY);
+        SelectObject(src, old);
+        let _ = DeleteDC(src);
     }
 
     /// Barra de título oscura (Windows 10 2004+ / 11) y del color del fondo en Windows 11.
@@ -2456,184 +3113,238 @@ mod app {
         unsafe {
             let on: u32 = 1;
             let _ = DwmSetWindowAttribute(hwnd, DWMWINDOWATTRIBUTE(20), &on as *const u32 as _, 4);
-            let caption: u32 = BG_COLOR;
+            let caption: u32 = SIDE;
             let _ = DwmSetWindowAttribute(hwnd, DWMWINDOWATTRIBUTE(35), &caption as *const u32 as _, 4);
         }
     }
 
-    /// Bitmap 32 bits de w×h relleno de color de fondo. Devuelve (bitmap, puntero a los píxeles).
-    unsafe fn dark_dib(w: i32, h: i32) -> Option<(HBITMAP, *mut u32)> {
+    /// Miniatura del Explorador (usa su caché) centrada en THUMB_W×THUMB_H, y la duración si es un video.
+    unsafe fn make_thumb(path: &Path) -> (Option<HBITMAP>, Option<u32>) {
+        use windows::core::Interface;
+        let p = wide(&path.to_string_lossy());
+        let Ok(item) = SHCreateItemFromParsingName::<_, _, IShellItem2>(PCWSTR(p.as_ptr()), None) else { return (None, None) };
+        let dur = item
+            .GetUInt64(&windows::Win32::Storage::EnhancedStorage::PKEY_Media_Duration)
+            .ok()
+            .map(|d| ((d + 5_000_000) / 10_000_000) as u32)
+            .filter(|&d| d > 0);
+        let Ok(f) = item.cast::<IShellItemImageFactory>() else { return (None, dur) };
+        let Ok(src) = f.GetImage(SIZE { cx: THUMB_W, cy: THUMB_H }, SIIGBF_RESIZETOFIT | SIIGBF_THUMBNAILONLY) else { return (None, dur) };
+        let mut bm = BITMAP::default();
+        GetObjectW(src.into(), std::mem::size_of::<BITMAP>() as i32, Some(&mut bm as *mut _ as _));
+        let (sw, sh) = (bm.bmWidth.min(THUMB_W), bm.bmHeight.abs().min(THUMB_H));
         let bmi = BITMAPINFO {
-            bmiHeader: BITMAPINFOHEADER { biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32, biWidth: w, biHeight: -h, biPlanes: 1, biBitCount: 32, ..Default::default() },
+            bmiHeader: BITMAPINFOHEADER { biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32, biWidth: THUMB_W, biHeight: -THUMB_H, biPlanes: 1, biBitCount: 32, ..Default::default() },
             ..Default::default()
         };
         let mut bits = std::ptr::null_mut();
-        let bmp = CreateDIBSection(None, &bmi, DIB_RGB_COLORS, &mut bits, None, 0).ok()?;
-        let px = bits as *mut u32;
-        for i in 0..(w * h) as usize {
-            *px.add(i) = 0xFF2A_2633;
-        }
-        Some((bmp, px))
-    }
-
-    /// Las ImageList de 32 bits usan el canal alfa: dejamos todo opaco.
-    unsafe fn opaque(px: *mut u32, n: usize) {
-        let _ = GdiFlush();
-        for i in 0..n {
-            *px.add(i) |= 0xFF00_0000;
-        }
-    }
-
-    /// Imagen 0 de la lista: el logo sobre fondo oscuro (mientras carga la miniatura).
-    unsafe fn add_placeholders(il: HIMAGELIST, w: i32, h: i32, icon: HICON) {
-        if let Some((bmp, px)) = dark_dib(w, h) {
-            let dc = CreateCompatibleDC(None);
-            let old = SelectObject(dc, bmp.into());
-            let s = h / 2;
-            let _ = DrawIconEx(dc, (w - s) / 2, (h - s) / 2, icon, s, s, 0, None, DI_NORMAL);
-            SelectObject(dc, old);
-            let _ = DeleteDC(dc);
-            opaque(px, (w * h) as usize);
-            ImageList_Add(il, bmp, None);
-            let _ = DeleteObject(bmp.into());
-        }
-    }
-
-    /// Miniatura del Explorador (usa su caché; no decodifica el video si ya la tiene), centrada en w×h.
-    unsafe fn make_thumb(path: &Path, w: i32, h: i32) -> Option<HBITMAP> {
-        let p = wide(&path.to_string_lossy());
-        let f: IShellItemImageFactory = SHCreateItemFromParsingName(PCWSTR(p.as_ptr()), None).ok()?;
-        let src = f.GetImage(SIZE { cx: w, cy: h }, SIIGBF_RESIZETOFIT | SIIGBF_THUMBNAILONLY).ok()?;
-        let mut bm = BITMAP::default();
-        GetObjectW(src.into(), std::mem::size_of::<BITMAP>() as i32, Some(&mut bm as *mut _ as _));
-        let (sw, sh) = (bm.bmWidth.min(w), bm.bmHeight.abs().min(h));
-        let (dst, px) = dark_dib(w, h)?;
+        let Ok(dst) = CreateDIBSection(None, &bmi, DIB_RGB_COLORS, &mut bits, None, 0) else {
+            let _ = DeleteObject(src.into());
+            return (None, dur);
+        };
         let d1 = CreateCompatibleDC(None);
         let d2 = CreateCompatibleDC(None);
         let o1 = SelectObject(d1, dst.into());
         let o2 = SelectObject(d2, src.into());
-        let _ = BitBlt(d1, (w - sw) / 2, (h - sh) / 2, sw, sh, Some(d2), 0, 0, SRCCOPY);
+        fill(d1, rc(0, 0, THUMB_W, THUMB_H), THUMB_BG);
+        let _ = BitBlt(d1, (THUMB_W - sw) / 2, (THUMB_H - sh) / 2, sw, sh, Some(d2), 0, 0, SRCCOPY);
         SelectObject(d1, o1);
         SelectObject(d2, o2);
         let _ = DeleteDC(d1);
         let _ = DeleteDC(d2);
         let _ = DeleteObject(src.into());
-        opaque(px, (w * h) as usize);
-        Some(dst)
+        (Some(dst), dur)
     }
 
-    /// Carga miniaturas en un hilo con prioridad de fondo (CPU y disco bajos). Se corta si la lista cambia o se cierra.
-    fn start_thumbnails(hwnd: HWND, files: Vec<PathBuf>, w: i32, h: i32) {
+    /// Hilo de miniaturas con prioridad de fondo (CPU y disco bajos). Termina cuando se cierra la ventana.
+    fn start_thumb_thread(hwnd: HWND, rx: std::sync::mpsc::Receiver<(u64, usize, PathBuf)>) {
         use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
         use windows::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_MODE_BACKGROUND_BEGIN};
-        let gen = THUMB_GEN.fetch_add(1, Ordering::Relaxed) + 1;
         let hw = hwnd.0 as isize;
         std::thread::spawn(move || unsafe {
             let _ = SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN);
             let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
-            for (i, p) in files.iter().enumerate().take(400) {
-                if THUMB_GEN.load(Ordering::Relaxed) != gen {
-                    break;
-                }
-                if let Some(bmp) = make_thumb(p, w, h) {
-                    let wp = (i & 0xFFFF) | ((gen as usize & 0xFFFF) << 16);
-                    if PostMessageW(Some(HWND(hw as _)), WM_THUMB, WPARAM(wp), LPARAM(bmp.0 as isize)).is_err() {
-                        let _ = DeleteObject(bmp.into());
-                        break;
+            while let Ok((gen, idx, path)) = rx.recv() {
+                let (bmp, dur) = make_thumb(&path);
+                let msg = Box::new((gen, idx, bmp.map_or(0, |b| b.0 as isize), dur));
+                let raw = Box::into_raw(msg);
+                if PostMessageW(Some(HWND(hw as _)), WM_THUMB, WPARAM(0), LPARAM(raw as isize)).is_err() {
+                    let m = Box::from_raw(raw);
+                    if m.2 != 0 {
+                        let _ = DeleteObject(HBITMAP(m.2 as _).into());
                     }
+                    break;
                 }
             }
             CoUninitialize();
         });
     }
 
-    /// Encabezado: degradé rosa → naranja, logo, título y estado.
-    unsafe fn paint_header(hwnd: HWND, dc: HDC) {
-        let Some((header, sub, big_font, font, icon)) =
-            with_app(|a| a.gallery.as_ref().map(|g| (g.header.clone(), g.sub.clone(), g.big_font, g.font, g.logo))).flatten()
-        else {
-            return;
-        };
-        let dpi = windows::Win32::UI::HiDpi::GetDpiForWindow(hwnd).max(96) as i32;
-        let sc = |v: i32| v * dpi / 96;
-        let mut r = RECT::default();
-        let _ = GetClientRect(hwnd, &mut r);
-        let hh = header_height(dpi);
-        let v = [
-            TRIVERTEX { x: 0, y: 0, Red: 0xFF00, Green: 0x2E00, Blue: 0x6300, Alpha: 0 },
-            TRIVERTEX { x: r.right, y: hh, Red: 0xFF00, Green: 0x9A00, Blue: 0x0000, Alpha: 0 },
-        ];
-        let gr = GRADIENT_RECT { UpperLeft: 0, LowerRight: 1 };
-        let _ = GradientFill(dc, &v, &gr as *const _ as _, 1, GRADIENT_FILL_RECT_H);
-        let isz = sc(52);
-        let _ = DrawIconEx(dc, sc(16), (hh - isz) / 2, icon, isz, isz, 0, None, DI_NORMAL);
-        SetBkMode(dc, TRANSPARENT);
-        SetTextColor(dc, COLORREF(0x00FF_FFFF));
-        let old = SelectObject(dc, big_font.into());
-        let t = wide("Jugadón");
-        let _ = TextOutW(dc, sc(80), sc(10), &t[..t.len() - 1]);
-        SelectObject(dc, font.into());
-        let t: Vec<u16> = header.encode_utf16().collect();
-        let _ = TextOutW(dc, sc(82), sc(46), &t);
-        let t: Vec<u16> = sub.encode_utf16().collect();
-        SetTextColor(dc, COLORREF(0x00F5_E8FF));
-        let _ = TextOutW(dc, sc(82), sc(64), &t);
-        SelectObject(dc, old);
-    }
-
-    /// Botones redondeados: los dos primeros naranjas, el resto oscuros.
-    unsafe fn draw_button(di: &DRAWITEMSTRUCT) {
-        let pressed = di.itemState.0 & ODS_SELECTED.0 != 0;
-        let accent = di.CtlID == 201 || di.CtlID == 202;
-        let color: u32 = match (accent, pressed) {
-            (true, false) => 0x0028_6AFF,
-            (true, true) => 0x0018_4ACC,
-            (false, false) => 0x0042_3A3E,
-            (false, true) => 0x002E_282B,
-        };
-        let r = di.rcItem;
-        let bg = CreateSolidBrush(COLORREF(BG_COLOR));
-        FillRect(di.hDC, &r, bg);
-        let _ = DeleteObject(bg.into());
-        let br = CreateSolidBrush(COLORREF(color));
-        let pen = CreatePen(PS_SOLID, 1, COLORREF(color));
-        let ob = SelectObject(di.hDC, br.into());
-        let op = SelectObject(di.hDC, pen.into());
-        let rad = (r.bottom - r.top) / 2;
-        let _ = RoundRect(di.hDC, r.left, r.top, r.right, r.bottom, rad, rad);
-        SelectObject(di.hDC, ob);
-        SelectObject(di.hDC, op);
-        let _ = DeleteObject(br.into());
-        let _ = DeleteObject(pen.into());
-        let mut t = [0u16; 64];
-        let n = GetWindowTextW(di.hwndItem, &mut t).max(0) as usize;
-        SetBkMode(di.hDC, TRANSPARENT);
-        SetTextColor(di.hDC, COLORREF(0x00FF_FFFF));
-        let mut rr = r;
-        DrawTextW(di.hDC, &mut t[..n], &mut rr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    /// Menú del clic derecho sobre una tarjeta.
+    unsafe fn card_menu(hwnd: HWND) -> usize {
+        let m = CreatePopupMenu().unwrap_or_default();
+        for (id, t) in [(201usize, "Abrir"), (202, "Compartir…"), (203, "Copiar (para pegar en Discord o WhatsApp)"), (204, "Mostrar en carpeta")] {
+            let t = wide(t);
+            let _ = AppendMenuW(m, MF_STRING, id, PCWSTR(t.as_ptr()));
+        }
+        let _ = AppendMenuW(m, MF_SEPARATOR, 0, PCWSTR::null());
+        let t = wide("Eliminar");
+        let _ = AppendMenuW(m, MF_STRING, 205, PCWSTR(t.as_ptr()));
+        let mut pt = POINT::default();
+        let _ = GetCursorPos(&mut pt);
+        let cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY, pt.x, pt.y, None, hwnd, None);
+        let _ = DestroyMenu(m);
+        cmd.0 as usize
     }
 
     unsafe extern "system" fn gallery_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+        let pt = || ((lp.0 & 0xFFFF) as i16 as i32, ((lp.0 >> 16) & 0xFFFF) as i16 as i32);
         match msg {
+            WM_ERASEBKGND => LRESULT(1),
             WM_PAINT => {
                 let mut ps = PAINTSTRUCT::default();
                 let dc = BeginPaint(hwnd, &mut ps);
-                paint_header(hwnd, dc);
+                let mut r = RECT::default();
+                let _ = GetClientRect(hwnd, &mut r);
+                let (w, h) = (r.right.max(1), r.bottom.max(1));
+                // doble búfer: se dibuja todo en memoria y se copia de una (sin parpadeo)
+                let mem = CreateCompatibleDC(Some(dc));
+                let bmp = CreateCompatibleBitmap(dc, w, h);
+                let old = SelectObject(mem, bmp.into());
+                if with_app(|a| a.paint_gallery(mem, w, h)).is_none() {
+                    fill(mem, rc(0, 0, w, h), BG_COLOR);
+                }
+                let _ = BitBlt(dc, 0, 0, w, h, Some(mem), 0, 0, SRCCOPY);
+                SelectObject(mem, old);
+                let _ = DeleteObject(bmp.into());
+                let _ = DeleteDC(mem);
                 let _ = EndPaint(hwnd, &ps);
                 LRESULT(0)
             }
-            WM_DRAWITEM => {
-                draw_button(&*(lp.0 as *const DRAWITEMSTRUCT));
-                LRESULT(1)
-            }
             WM_SIZE => {
-                with_app(|a| a.layout_gallery());
-                let _ = InvalidateRect(Some(hwnd), None, true);
+                let _ = InvalidateRect(Some(hwnd), None, false);
                 LRESULT(0)
             }
             WM_GETMINMAXINFO => {
+                let dpi = windows::Win32::UI::HiDpi::GetDpiForWindow(hwnd).max(96) as i32;
                 let mi = &mut *(lp.0 as *mut MINMAXINFO);
-                mi.ptMinTrackSize = POINT { x: 760, y: 420 };
+                mi.ptMinTrackSize = POINT { x: 780 * dpi / 96, y: 560 * dpi / 96 };
+                LRESULT(0)
+            }
+            WM_TIMER => {
+                // reloj de la grabación y estado
+                with_app(|a| {
+                    if a.manual.is_some() {
+                        a.redraw_gallery();
+                    }
+                });
+                LRESULT(0)
+            }
+            WM_MOUSEMOVE => {
+                let (x, y) = pt();
+                with_app(|a| {
+                    let Some(g) = a.gallery.as_mut() else { return };
+                    if g.drag.is_some() {
+                        g.drag_to(y);
+                        return;
+                    }
+                    if !g.tracking {
+                        let mut tme = TRACKMOUSEEVENT { cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: hwnd, dwHoverTime: 0 };
+                        let _ = TrackMouseEvent(&mut tme);
+                        g.tracking = true;
+                    }
+                    let h = g.hit_at(x, y);
+                    if h != g.hover {
+                        g.hover = h;
+                        g.redraw();
+                    }
+                });
+                LRESULT(0)
+            }
+            WM_MOUSELEAVE => {
+                with_app(|a| {
+                    if let Some(g) = a.gallery.as_mut() {
+                        g.tracking = false;
+                        if g.hover != Hit::None {
+                            g.hover = Hit::None;
+                            g.redraw();
+                        }
+                    }
+                });
+                LRESULT(0)
+            }
+            WM_SETCURSOR => {
+                if (lp.0 & 0xFFFF) as u32 == HTCLIENT && with_app(|a| a.gallery.as_ref().is_some_and(|g| g.hover != Hit::None)).unwrap_or(false) {
+                    SetCursor(LoadCursorW(None, IDC_HAND).ok());
+                    return LRESULT(1);
+                }
+                DefWindowProcW(hwnd, msg, wp, lp)
+            }
+            WM_LBUTTONDOWN | WM_LBUTTONDBLCLK => {
+                let _ = SetFocus(Some(hwnd));
+                let (x, y) = pt();
+                if let Some(Some(Outside::Menu)) = with_app(|a| a.gallery_click(x, y, msg == WM_LBUTTONDBLCLK)) {
+                    let main = HWND(MAIN_HWND.load(Ordering::Relaxed) as _);
+                    show_menu(main);
+                    with_app(|a| {
+                        a.fill_gallery();
+                    });
+                }
+                LRESULT(0)
+            }
+            WM_LBUTTONUP => {
+                with_app(|a| {
+                    if let Some(g) = a.gallery.as_mut() {
+                        if g.drag.take().is_some() {
+                            let _ = ReleaseCapture();
+                            g.redraw();
+                        }
+                    }
+                });
+                LRESULT(0)
+            }
+            WM_RBUTTONUP => {
+                let (x, y) = pt();
+                let on_card = with_app(|a| {
+                    let g = a.gallery.as_mut()?;
+                    match g.hit_at(x, y) {
+                        Hit::Card(i) | Hit::Play(i) | Hit::Act(i, _) => {
+                            g.sel = Some(i);
+                            g.redraw();
+                            Some(())
+                        }
+                        _ => None,
+                    }
+                })
+                .flatten();
+                if on_card.is_some() {
+                    let _ = UpdateWindow(hwnd);
+                    let cmd = card_menu(hwnd);
+                    if cmd != 0 {
+                        with_app(|a| a.gallery_cmd(cmd));
+                    }
+                }
+                LRESULT(0)
+            }
+            WM_MOUSEWHEEL => {
+                let delta = ((wp.0 >> 16) & 0xFFFF) as i16 as i32;
+                let dpi = windows::Win32::UI::HiDpi::GetDpiForWindow(hwnd).max(96) as i32;
+                with_app(|a| {
+                    if let Some(g) = a.gallery.as_mut() {
+                        g.scroll_by(-delta * 140 * dpi / 96 / 120);
+                    }
+                });
+                LRESULT(0)
+            }
+            WM_KEYDOWN => {
+                let vk = wp.0 as u16;
+                let ctrl = GetKeyState(VK_CONTROL.0 as i32) < 0;
+                with_app(|a| {
+                    let cmd = if ctrl && vk == b'C' as u16 { Some(203) } else { a.gallery.as_mut().and_then(|g| g.key(vk)) };
+                    if let Some(c) = cmd {
+                        a.gallery_cmd(c);
+                    }
+                });
                 LRESULT(0)
             }
             WM_COMMAND => {
@@ -2641,31 +3352,20 @@ mod app {
                 with_app(|a| a.gallery_cmd(id));
                 LRESULT(0)
             }
-            WM_NOTIFY => {
-                let h = &*(lp.0 as *const NMHDR);
-                if h.idFrom == 300 && h.code == NM_DBLCLK {
-                    with_app(|a| a.gallery_cmd(201));
-                }
-                DefWindowProcW(hwnd, msg, wp, lp)
-            }
             WM_THUMB => {
-                let bmp = HBITMAP(lp.0 as _);
-                let (idx, gen) = (wp.0 & 0xFFFF, ((wp.0 >> 16) & 0xFFFF) as u64);
-                let cur = THUMB_GEN.load(Ordering::Relaxed) & 0xFFFF;
-                if with_app(|a| a.add_thumb(idx, if gen == cur { THUMB_GEN.load(Ordering::Relaxed) } else { u64::MAX }, bmp)).is_none() {
+                let m = Box::from_raw(lp.0 as *mut (u64, usize, isize, Option<u32>));
+                let (gen, idx, bmp, dur) = *m;
+                let bmp = HBITMAP(bmp as _);
+                if with_app(|a| a.add_thumb(gen, idx, bmp, dur)).is_none() && !bmp.is_invalid() {
                     let _ = DeleteObject(bmp.into());
                 }
                 LRESULT(0)
             }
             WM_DESTROY => {
-                // cerrar con la X: se libera la ventana entera (miniaturas incluidas) y Jugadón sigue en la bandeja
-                THUMB_GEN.fetch_add(1, Ordering::Relaxed);
+                // cerrar con la X: se libera la ventana entera (miniaturas, fuentes, hilo) y Jugadón sigue en la bandeja
+                let _ = KillTimer(Some(hwnd), 1);
                 with_app(|a| {
-                    if let Some(g) = a.gallery.take() {
-                        let _ = DeleteObject(g.font.into());
-                        let _ = DeleteObject(g.big_font.into());
-                        let _ = DestroyIcon(g.logo);
-                    }
+                    a.gallery = None;
                     a.share_token = None;
                 });
                 trim_ram();
@@ -2770,9 +3470,15 @@ mod app {
             let cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY, pt.x, pt.y, None, hwnd, None);
             let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
             let _ = DestroyMenu(menu);
-            let id = cmd.0 as usize;
-            id != 0 && with_app(|a| a.command(id)).unwrap_or(false)
+            cmd.0 as usize
         };
+        run_command(hwnd, quit);
+    }
+
+    /// Ejecuta un comando del menú (también llega como WM_COMMAND, así la prueba automática del CI
+    /// puede usar cada opción sin el mouse).
+    fn run_command(hwnd: HWND, id: usize) {
+        let quit = id != 0 && with_app(|a| a.command(id)).unwrap_or(false);
         if quit {
             with_app(|a| a.shutdown());
             unsafe {
@@ -2791,6 +3497,22 @@ mod app {
                     show_menu(hwnd);
                 } else if m == NIN_BALLOONUSERCLICK {
                     with_app(|a| a.show_last_file());
+                }
+                LRESULT(0)
+            }
+            WM_COMMAND => {
+                let id = wp.0 & 0xFFFF;
+                if id == 99 {
+                    // grabar la ventana cuyo handle viene en lParam (para la prueba automática)
+                    with_app(|a| a.start_manual(Source::Window(lp.0 as u64), "la ventana".to_string()));
+                } else {
+                    if (100..120).contains(&id) {
+                        // la lista de ventanas se arma al construir el menú
+                        if let Some(m) = with_app(|a| a.build_menu()) {
+                            let _ = DestroyMenu(m);
+                        }
+                    }
+                    run_command(hwnd, id);
                 }
                 LRESULT(0)
             }
@@ -2956,6 +3678,7 @@ mod app {
                 lpszClassName: w!("jugadon_gallery"),
                 hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
                 hbrBackground: CreateSolidBrush(COLORREF(BG_COLOR)),
+                style: CS_DBLCLKS,
                 ..Default::default()
             };
             if RegisterClassW(&gwc) == 0 {

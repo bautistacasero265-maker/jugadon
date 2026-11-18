@@ -171,6 +171,9 @@ jobs:
             [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
             [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
             [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+            [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+            [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr h, ref POINT p);
+            public struct POINT { public int X, Y; }
             [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr h, int a, out RECT r, int s);
             public struct RECT { public int L, T, R, B; }
           }
@@ -190,6 +193,12 @@ jobs:
           }
           Start-Sleep -Seconds 8
           [W]::SetForegroundWindow($h) | Out-Null
+          # primera tarjeta elegida y el mouse sobre la segunda (se ven el borde y los botones)
+          [W]::PostMessage($h, 0x111, [IntPtr]210, [IntPtr]::Zero) | Out-Null
+          $pt = New-Object W+POINT
+          $pt.X = 650; $pt.Y = 170
+          [W]::ClientToScreen($h, [ref]$pt) | Out-Null
+          [W]::SetCursorPos($pt.X, $pt.Y) | Out-Null
           Start-Sleep -Seconds 2
           $r = New-Object W+RECT
           # borde visible de la ventana (sin la sombra invisible que agarraría lo de atrás)
@@ -211,6 +220,18 @@ jobs:
           Write-Host ("RAM privada con la ventana abierta: {0:N0} KB" -f ($open / 1KB))
           Write-Host ("RAM privada después de cerrarla con la X: {0:N0} KB" -f ($closed / 1KB))
           if (-not $alive) { throw "Jugadón se cerró al cerrar la ventana (tenía que quedar en la bandeja)" }
+
+      - name: Prueba completa de la app (teclas, menú con la ventana cerrada y abierta, grabar ventana, corte de golpe, salir)
+        timeout-minutes: 25
+        run: ./ci/e2e.ps1
+
+      - name: Subir fotos de la prueba completa
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: prueba-completa
+          path: e2e/*.png
+          if-no-files-found: ignore
 
       - name: Guardar la foto de la ventana en el repo (solo al ejecutar a mano)
         if: github.event_name == 'workflow_dispatch'
