@@ -1076,6 +1076,8 @@ mod app {
         buttons: Vec<HWND>,
         font: HFONT,
         big_font: HFONT,
+        /// logo en tamaño grande (el de la bandeja es de 16 px y se ve pixelado agrandado)
+        logo: HICON,
         il: HIMAGELIST,
         files: Vec<PathBuf>,
         /// texto del encabezado (estado, cantidad de clips…)
@@ -2189,10 +2191,11 @@ mod app {
                 send(list, LVM_SETTEXTCOLOR, 0, 0x00F0_EBEB);
                 let (tw, th) = thumb_size(dpi);
                 let il = ImageList_Create(tw, th, ILC_COLOR32, 32, 32);
-                add_placeholders(il, tw, th, self.icon_on);
+                let logo = load_icon_size(hinst, 1, sc(64));
+                add_placeholders(il, tw, th, logo);
                 send(list, LVM_SETIMAGELIST, LVSIL_NORMAL as usize, il.0 as isize);
                 send(list, LVM_SETICONSPACING, 0, ((tw + sc(28)) as isize) | (((th + sc(52)) as isize) << 16));
-                self.gallery = Some(Gallery { hwnd, list, buttons, font, big_font, il, files: Vec::new(), header: String::new(), sub: String::new() });
+                self.gallery = Some(Gallery { hwnd, list, buttons, font, big_font, logo, il, files: Vec::new(), header: String::new(), sub: String::new() });
                 self.layout_gallery();
                 self.fill_gallery();
                 let _ = ShowWindow(hwnd, SW_SHOW);
@@ -2232,7 +2235,6 @@ mod app {
                 hk(self.cfg.rec),
                 hk(self.cfg.shot)
             );
-            let icon = self.icon_on;
             let Some(g) = self.gallery.as_mut() else { return };
             let mut files: Vec<(std::time::SystemTime, PathBuf, u64)> = fs::read_dir(&folder)
                 .map(|rd| {
@@ -2259,7 +2261,7 @@ mod app {
                 let (tw, th) = thumb_size(dpi);
                 send(g.list, LVM_DELETEALLITEMS, 0, 0);
                 let _ = ImageList_Remove(g.il, -1);
-                add_placeholders(g.il, tw, th, icon);
+                add_placeholders(g.il, tw, th, g.logo);
                 for (i, (_, path, len)) in files.iter().enumerate() {
                     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                     let (kind, date) = logic::describe_file(&name);
@@ -2469,7 +2471,9 @@ mod app {
 
     /// Encabezado: degradé rosa → naranja, logo, título y estado.
     unsafe fn paint_header(hwnd: HWND, dc: HDC) {
-        let Some((header, sub, big_font, font)) = with_app(|a| a.gallery.as_ref().map(|g| (g.header.clone(), g.sub.clone(), g.big_font, g.font))).flatten() else {
+        let Some((header, sub, big_font, font, icon)) =
+            with_app(|a| a.gallery.as_ref().map(|g| (g.header.clone(), g.sub.clone(), g.big_font, g.font, g.logo))).flatten()
+        else {
             return;
         };
         let dpi = windows::Win32::UI::HiDpi::GetDpiForWindow(hwnd).max(96) as i32;
@@ -2483,7 +2487,6 @@ mod app {
         ];
         let gr = GRADIENT_RECT { UpperLeft: 0, LowerRight: 1 };
         let _ = GradientFill(dc, &v, &gr as *const _ as _, 1, GRADIENT_FILL_RECT_H);
-        let icon = with_app(|a| a.icon_on).unwrap_or_default();
         let isz = sc(52);
         let _ = DrawIconEx(dc, sc(16), (hh - isz) / 2, icon, isz, isz, 0, None, DI_NORMAL);
         SetBkMode(dc, TRANSPARENT);
@@ -2583,6 +2586,7 @@ mod app {
                     if let Some(g) = a.gallery.take() {
                         let _ = DeleteObject(g.font.into());
                         let _ = DeleteObject(g.big_font.into());
+                        let _ = DestroyIcon(g.logo);
                     }
                     a.share_token = None;
                 });
