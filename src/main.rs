@@ -52,13 +52,15 @@ mod logic {
                 encoder: 0,
                 bg: BG_GAMES,
                 rec: Hotkey { vk: VK_F8, mods: 0 },
-                mic: false,
+                mic: true,
                 sound: true,
             }
         }
 
         pub fn parse(text: &str, default_folder: String) -> Self {
             let mut c = Self::defaults(default_folder);
+            // configs anteriores a la versión 2 tenían el micrófono apagado por defecto: se ignora ese valor
+            let v2 = text.lines().any(|l| l.trim() == "version=2");
             for line in text.lines() {
                 let Some((k, v)) = line.split_once('=') else { continue };
                 let (k, v) = (k.trim(), v.trim());
@@ -77,7 +79,7 @@ mod logic {
                     ("only_games", Some(0)) => c.bg = BG_ALWAYS, // config de la versión 0.3
                     ("rec_key", Some(n)) if (1..=254).contains(&n) => c.rec.vk = n,
                     ("rec_mods", Some(n)) => c.rec.mods = n & 7,
-                    ("mic", Some(n)) if n <= 1 => c.mic = n == 1,
+                    ("mic", Some(n)) if n <= 1 && v2 => c.mic = n == 1,
                     ("sound", Some(n)) if n <= 1 => c.sound = n == 1,
                     _ => {}
                 }
@@ -92,7 +94,7 @@ mod logic {
 
         pub fn serialize(&self) -> String {
             format!(
-                "seconds={}\nfps={}\nheight={}\nclip_key={}\nclip_mods={}\nshot_key={}\nshot_mods={}\nfolder={}\nencoder={}\nbg={}\nrec_key={}\nrec_mods={}\nmic={}\nsound={}\n",
+                "version=2\nseconds={}\nfps={}\nheight={}\nclip_key={}\nclip_mods={}\nshot_key={}\nshot_mods={}\nfolder={}\nencoder={}\nbg={}\nrec_key={}\nrec_mods={}\nmic={}\nsound={}\n",
                 self.secs,
                 self.fps,
                 self.height,
@@ -337,6 +339,45 @@ mod logic {
         format!("{y:04}-{mo:02}-{d:02}_{h:02}-{mi:02}-{sec:02}")
     }
 
+    /// Para la ventana de clips: (tipo, fecha legible) a partir del nombre del archivo.
+    pub fn describe_file(name: &str) -> (&'static str, String) {
+        let kind = if name.starts_with("clip_") {
+            "Clip"
+        } else if name.starts_with("grabacion") {
+            "Grabación"
+        } else if name.starts_with("shot_") {
+            "Captura"
+        } else if name.ends_with(".png") {
+            "Imagen"
+        } else {
+            "Video"
+        };
+        // ..._AAAA-MM-DD_HH-MM-SS.ext
+        let stem = name.rsplit_once('.').map_or(name, |x| x.0);
+        let date = stem
+            .char_indices()
+            .filter(|(_, c)| c.is_ascii_digit())
+            .map(|(i, _)| i)
+            .find(|&i| {
+                let t = stem.get(i..i + 19).unwrap_or("").as_bytes();
+                t.len() == 19 && t[4] == b'-' && t[7] == b'-' && t[10] == b'_' && t[13] == b'-' && t[16] == b'-'
+            })
+            .map(|i| {
+                let t = &stem[i..i + 19];
+                format!("{}/{}/{} {}:{}", &t[8..10], &t[5..7], &t[0..4], &t[11..13], &t[14..16])
+            })
+            .unwrap_or_default();
+        (kind, date)
+    }
+
+    pub fn fmt_size(bytes: u64) -> String {
+        if bytes >= 1 << 30 {
+            format!("{:.1} GB", bytes as f64 / (1u64 << 30) as f64)
+        } else {
+            format!("{:.1} MB", bytes as f64 / (1u64 << 20) as f64)
+        }
+    }
+
     /// Suma `q` (multiplicado por `gain`) sobre `out` y saca de `q` lo usado.
     pub fn mix_into(out: &mut [f32], q: &mut Vec<f32>, gain: f32) {
         let n = out.len().min(q.len());
@@ -419,7 +460,7 @@ mod logic {
             c.encoder = 3;
             c.bg = BG_OFF;
             c.rec = Hotkey { vk: 0x52, mods: MOD_ALT };
-            c.mic = true;
+            c.mic = false;
             c.sound = false;
             c.folder = "D:\\Mis clips\\Jugadon".into();
             assert_eq!(Config::parse(&c.serialize(), "C:\\y".into()), c);
@@ -441,16 +482,28 @@ mod logic {
         #[test]
         fn new_options_default_and_parse() {
             let d = Config::defaults("F".into());
-            assert!(d.bg == BG_GAMES && !d.mic && d.sound && d.rec.vk == VK_F8);
-            let c = Config::parse("bg=0\nmic=1\nsound=0\n", "F".into());
-            assert!(c.bg == BG_OFF && c.mic && !c.sound);
+            assert!(d.bg == BG_GAMES && d.mic && d.sound && d.rec.vk == VK_F8);
+            let c = Config::parse("version=2\nbg=0\nmic=0\nsound=0\n", "F".into());
+            assert!(c.bg == BG_OFF && !c.mic && !c.sound);
             let c = Config::parse("bg=7\nmic=x\n", "F".into());
-            assert!(c.bg == BG_GAMES && !c.mic);
+            assert!(c.bg == BG_GAMES && c.mic);
+            // config vieja (sin version=2) con mic=0: ahora el mic viene prendido
+            assert!(Config::parse("mic=0\n", "F".into()).mic);
             // config vieja (0.3): only_games=0 -> siempre
             assert_eq!(Config::parse("only_games=0\n", "F".into()).bg, BG_ALWAYS);
             // tecla de grabar repetida -> defaults
             let c = Config::parse("rec_key=120\n", "F".into());
             assert_eq!((c.clip.vk, c.shot.vk, c.rec.vk), (VK_F9, VK_F10, VK_F8));
+        }
+
+        #[test]
+        fn gallery_rows() {
+            assert_eq!(describe_file("clip_2026-11-18_16-30-05.mp4"), ("Clip", "18/11/2026 16:30".to_string()));
+            assert_eq!(describe_file("grabacion_recuperada_2026-01-02_03-04-05_0.mp4"), ("Grabación", "02/01/2026 03:04".to_string()));
+            assert_eq!(describe_file("shot_2026-11-18_16-30-05.png").0, "Captura");
+            assert_eq!(describe_file("mi video.mp4"), ("Video", String::new()));
+            assert_eq!(fmt_size(5 * 1024 * 1024 + 512 * 1024), "5.5 MB");
+            assert_eq!(fmt_size(3 << 30), "3.0 GB");
         }
 
         #[test]
@@ -739,7 +792,7 @@ mod app {
     use std::process::{Child, Command, Stdio};
     use std::sync::atomic::{AtomicIsize, AtomicU32, Ordering};
     use std::time::{Duration, Instant, UNIX_EPOCH};
-    use windows::core::{w, PCWSTR};
+    use windows::core::{w, PCWSTR, PWSTR};
     use windows::Win32::Foundation::*;
     use windows::Win32::Graphics::Gdi::*;
     use windows::Win32::System::JobObjects::*;
@@ -748,6 +801,7 @@ mod app {
     use windows::Win32::System::Registry::*;
     use windows::Win32::System::SystemInformation::GetLocalTime;
     use windows::Win32::System::Threading::{CreateMutexW, GetCurrentProcess};
+    use windows::Win32::UI::Controls::*;
     use windows::Win32::UI::Input::KeyboardAndMouse::*;
     use windows::Win32::UI::Shell::*;
     use windows::Win32::UI::WindowsAndMessaging::*;
@@ -799,6 +853,15 @@ mod app {
         audio: bool,
     }
 
+    struct Gallery {
+        hwnd: HWND,
+        list: HWND,
+        status: HWND,
+        buttons: Vec<HWND>,
+        font: HFONT,
+        files: Vec<PathBuf>,
+    }
+
     struct App {
         hwnd: HWND,
         cfg: Config,
@@ -813,6 +876,9 @@ mod app {
         manual: Option<Manual>,
         rec_dir: PathBuf,
         menu_windows: Vec<(HWND, String)>,
+        /// ventana "Mis clips": solo existe mientras está abierta (cerrarla libera todo)
+        gallery: Option<Gallery>,
+        share_token: Option<i64>,
         rec: Rec,
         binding: u8,
         hook: Option<HHOOK>,
@@ -1588,6 +1654,7 @@ mod app {
                 let t = wide(&self.status());
                 let _ = AppendMenuW(m, MF_STRING | MF_GRAYED, 0, PCWSTR(t.as_ptr()));
                 sep(m);
+                add(m, 5, "Ver mis clips…", false);
                 add(m, 1, &format!("Guardar clip\t{}", hk(self.cfg.clip)), false);
                 add(m, 2, &format!("Captura\t{}", hk(self.cfg.shot)), false);
                 if self.manual.is_some() {
@@ -1652,6 +1719,7 @@ mod app {
                 2 => self.screenshot(),
                 3 => self.copy_last_clip(),
                 4 => self.toggle_manual_screen(),
+                5 => self.open_gallery(),
                 100..=119 => self.record_window(id - 100),
                 45..=47 => {
                     let bg = [BG_OFF, BG_GAMES, BG_ALWAYS][id - 45];
@@ -1733,6 +1801,316 @@ mod app {
             unsafe {
                 let _ = Shell_NotifyIconW(NIM_DELETE, &self.nid());
             }
+        }
+    }
+
+    // ---------- ventana "Mis clips" ----------
+
+    const GALLERY_BUTTONS: [(usize, &str); 6] = [
+        (201, "▶  Abrir"),
+        (202, "Compartir…"),
+        (203, "Copiar (para Discord)"),
+        (204, "Mostrar en carpeta"),
+        (205, "Eliminar"),
+        (206, "Abrir carpeta"),
+    ];
+
+    fn send(h: HWND, msg: u32, wp: usize, lp: isize) -> isize {
+        unsafe { SendMessageW(h, msg, Some(WPARAM(wp)), Some(LPARAM(lp))).0 }
+    }
+
+    /// Ícono chico del sistema para el tipo de archivo (el mismo que usa el Explorador; no lee el archivo).
+    fn sys_icon(ext: &str) -> (i32, isize) {
+        unsafe {
+            let name = wide(&format!("x.{ext}"));
+            let mut fi = SHFILEINFOW::default();
+            let il = SHGetFileInfoW(
+                PCWSTR(name.as_ptr()),
+                windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES(0x80),
+                Some(&mut fi),
+                std::mem::size_of::<SHFILEINFOW>() as u32,
+                SHGFI_SYSICONINDEX | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES,
+            );
+            (fi.iIcon, il as isize)
+        }
+    }
+
+    /// Abre la ventana de compartir de Windows con el archivo.
+    fn share_file(hwnd: HWND, path: String, token: &mut Option<i64>) -> windows::core::Result<()> {
+        use windows::ApplicationModel::DataTransfer::{DataRequestedEventArgs, DataTransferManager};
+        use windows::Foundation::TypedEventHandler;
+        use windows::Storage::{IStorageItem, StorageFile};
+        use windows::core::{Interface, HSTRING};
+        unsafe {
+            let interop: IDataTransferManagerInterop = windows::core::factory::<DataTransferManager, IDataTransferManagerInterop>()?;
+            let dtm: DataTransferManager = interop.GetForWindow(hwnd)?;
+            if let Some(t) = token.take() {
+                let _ = dtm.RemoveDataRequested(t);
+            }
+            let handler = TypedEventHandler::<DataTransferManager, DataRequestedEventArgs>::new(move |_, args| {
+                let Some(args) = args.as_ref() else { return Ok(()) };
+                let data = args.Request()?.Data()?;
+                let name = std::path::Path::new(&path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                data.Properties()?.SetTitle(&HSTRING::from(name))?;
+                let file = StorageFile::GetFileFromPathAsync(&HSTRING::from(path.as_str()))?.join()?;
+                let items: windows_collections::IIterable<IStorageItem> = vec![Some(file.cast::<IStorageItem>()?)].into();
+                data.SetStorageItemsReadOnly(&items)?;
+                Ok(())
+            });
+            *token = Some(dtm.DataRequested(&handler)?);
+            interop.ShowShareUIForWindow(hwnd)
+        }
+    }
+
+    impl App {
+        fn open_gallery(&mut self) {
+            unsafe {
+                if let Some(g) = &self.gallery {
+                    let _ = ShowWindow(g.hwnd, SW_RESTORE);
+                    let _ = SetForegroundWindow(g.hwnd);
+                    return;
+                }
+                let hinst: HINSTANCE = GetModuleHandleW(None).unwrap_or_default().into();
+                let dpi = windows::Win32::UI::HiDpi::GetDpiForSystem().max(96) as i32;
+                let sc = |v: i32| v * dpi / 96;
+                let Ok(hwnd) = CreateWindowExW(
+                    WINDOW_EX_STYLE(0),
+                    w!("jugadon_gallery"),
+                    w!("Jugadón – Mis clips"),
+                    WS_OVERLAPPEDWINDOW,
+                    CW_USEDEFAULT,
+                    CW_USEDEFAULT,
+                    sc(820),
+                    sc(520),
+                    None,
+                    None,
+                    Some(hinst),
+                    None,
+                ) else {
+                    return;
+                };
+                let _ = SendMessageW(hwnd, WM_SETICON, Some(WPARAM(ICON_SMALL as usize)), Some(LPARAM(self.icon_on.0 as isize)));
+                let big = load_icon_size(hinst, 1, GetSystemMetrics(SM_CXICON));
+                let _ = SendMessageW(hwnd, WM_SETICON, Some(WPARAM(ICON_BIG as usize)), Some(LPARAM(big.0 as isize)));
+                // fuente de los mensajes de Windows (se ve como el resto del sistema)
+                let mut ncm = NONCLIENTMETRICSW { cbSize: std::mem::size_of::<NONCLIENTMETRICSW>() as u32, ..Default::default() };
+                let _ = SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, ncm.cbSize, Some(&mut ncm as *mut _ as _), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0));
+                let font = CreateFontIndirectW(&ncm.lfMessageFont);
+                let child = |class: PCWSTR, text: &str, style: u32, id: usize| -> HWND {
+                    let t = wide(text);
+                    let h = CreateWindowExW(
+                        WINDOW_EX_STYLE(0),
+                        class,
+                        PCWSTR(t.as_ptr()),
+                        WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | style),
+                        0,
+                        0,
+                        10,
+                        10,
+                        Some(hwnd),
+                        Some(HMENU(id as _)),
+                        Some(hinst),
+                        None,
+                    )
+                    .unwrap_or_default();
+                    let _ = SendMessageW(h, WM_SETFONT, Some(WPARAM(font.0 as usize)), Some(LPARAM(1)));
+                    h
+                };
+                let status = child(w!("STATIC"), "", 0, 0);
+                let buttons = GALLERY_BUTTONS.iter().map(|(id, t)| child(w!("BUTTON"), t, 0, *id)).collect();
+                let list = child(
+                    w!("SysListView32"),
+                    "",
+                    (LVS_REPORT | LVS_SHOWSELALWAYS | LVS_SINGLESEL | LVS_SHAREIMAGELISTS) as u32 | WS_BORDER.0 | WS_TABSTOP.0,
+                    300,
+                );
+                send(list, LVM_SETEXTENDEDLISTVIEWSTYLE, 0, (LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER) as isize);
+                for (i, (name, width)) in [("Nombre", 330), ("Tipo", 100), ("Fecha", 140), ("Tamaño", 90)].iter().enumerate() {
+                    let t = wide(name);
+                    let col = LVCOLUMNW { mask: LVCF_TEXT | LVCF_WIDTH, cx: sc(*width), pszText: PWSTR(t.as_ptr() as _), ..Default::default() };
+                    send(list, LVM_INSERTCOLUMNW, i, &col as *const _ as isize);
+                }
+                self.gallery = Some(Gallery { hwnd, list, status, buttons, font, files: Vec::new() });
+                self.layout_gallery();
+                self.fill_gallery();
+                let _ = ShowWindow(hwnd, SW_SHOW);
+                let _ = SetForegroundWindow(hwnd);
+            }
+        }
+
+        fn layout_gallery(&self) {
+            let Some(g) = &self.gallery else { return };
+            unsafe {
+                let mut r = RECT::default();
+                let _ = GetClientRect(g.hwnd, &mut r);
+                let dpi = windows::Win32::UI::HiDpi::GetDpiForWindow(g.hwnd).max(96) as i32;
+                let sc = |v: i32| v * dpi / 96;
+                let (m, bh) = (sc(10), sc(30));
+                let _ = MoveWindow(g.status, m, m, r.right - 2 * m, sc(20), true);
+                let mut x = m;
+                for b in &g.buttons {
+                    let mut t = [0u16; 64];
+                    let n = GetWindowTextW(*b, &mut t).max(0);
+                    let bw = sc(24) + n * sc(7);
+                    let _ = MoveWindow(*b, x, m + sc(26), bw, bh, true);
+                    x += bw + sc(6);
+                }
+                let top = m + sc(26) + bh + m;
+                let _ = MoveWindow(g.list, m, top, r.right - 2 * m, (r.bottom - top - m).max(0), true);
+            }
+        }
+
+        /// Lee la carpeta de clips (solo nombres y fechas; no abre los videos).
+        fn fill_gallery(&mut self) {
+            let folder = self.cfg.folder.clone();
+            let status = format!(
+                "{}     ·     {} guardar clip   ·   {} grabar/frenar   ·   {} captura",
+                self.status(),
+                hk(self.cfg.clip),
+                hk(self.cfg.rec),
+                hk(self.cfg.shot)
+            );
+            let Some(g) = self.gallery.as_mut() else { return };
+            let mut files: Vec<(std::time::SystemTime, PathBuf, u64)> = fs::read_dir(&folder)
+                .map(|rd| {
+                    rd.flatten()
+                        .filter(|e| e.path().extension().is_some_and(|x| x == "mp4" || x == "png"))
+                        .filter_map(|e| {
+                            let m = e.metadata().ok()?;
+                            Some((m.modified().ok()?, e.path(), m.len()))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            files.sort_by(|a, b| b.0.cmp(&a.0));
+            files.truncate(2000);
+            unsafe {
+                let t = wide(&status);
+                let _ = SetWindowTextW(g.status, PCWSTR(t.as_ptr()));
+                send(g.list, LVM_DELETEALLITEMS, 0, 0);
+                let (_, il) = sys_icon("mp4");
+                send(g.list, LVM_SETIMAGELIST, LVSIL_SMALL as usize, il);
+                let (vid_icon, _) = sys_icon("mp4");
+                let (img_icon, _) = sys_icon("png");
+                for (i, (_, path, len)) in files.iter().enumerate() {
+                    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    let (kind, date) = logic::describe_file(&name);
+                    let icon = if name.ends_with(".png") { img_icon } else { vid_icon };
+                    let tn = wide(&name);
+                    let item = LVITEMW { mask: LVIF_TEXT | LVIF_IMAGE, iItem: i as i32, pszText: PWSTR(tn.as_ptr() as _), iImage: icon, ..Default::default() };
+                    send(g.list, LVM_INSERTITEMW, 0, &item as *const _ as isize);
+                    for (sub, text) in [(1, kind.to_string()), (2, date), (3, logic::fmt_size(*len))] {
+                        let tt = wide(&text);
+                        let it = LVITEMW { iSubItem: sub, pszText: PWSTR(tt.as_ptr() as _), ..Default::default() };
+                        send(g.list, LVM_SETITEMTEXTW, i, &it as *const _ as isize);
+                    }
+                }
+                if files.is_empty() {
+                    let t = wide("Todavía no hay clips. Abrí un juego y apretá F9 (o F8 para grabar).");
+                    let _ = SetWindowTextW(g.status, PCWSTR(t.as_ptr()));
+                }
+            }
+            g.files = files.into_iter().map(|f| f.1).collect();
+        }
+
+        fn selected_file(&self) -> Option<PathBuf> {
+            let g = self.gallery.as_ref()?;
+            let i = send(g.list, LVM_GETNEXTITEM, usize::MAX, LVNI_SELECTED as isize);
+            g.files.get(usize::try_from(i).ok()?).cloned()
+        }
+
+        fn gallery_cmd(&mut self, id: usize) {
+            if id == 206 {
+                if let Some(d) = self.out_dir() {
+                    let _ = Command::new("explorer.exe").arg(d).spawn();
+                }
+                return;
+            }
+            let Some(f) = self.selected_file() else {
+                self.notify("Elegí un clip de la lista primero.", false);
+                return;
+            };
+            let fs_ = f.to_string_lossy().into_owned();
+            match id {
+                201 => {
+                    let p = wide(&fs_);
+                    unsafe {
+                        ShellExecuteW(None, w!("open"), PCWSTR(p.as_ptr()), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL);
+                    }
+                }
+                202 => {
+                    let hwnd = self.gallery.as_ref().map(|g| g.hwnd).unwrap_or(self.hwnd);
+                    let mut token = self.share_token.take();
+                    let r = share_file(hwnd, fs_.clone(), &mut token);
+                    self.share_token = token;
+                    if r.is_err() && copy_file_to_clipboard(self.hwnd, &fs_) {
+                        self.notify("No se pudo abrir Compartir de Windows: lo copié, pegalo con Ctrl+V donde quieras.", false);
+                    }
+                }
+                203 => {
+                    if copy_file_to_clipboard(self.hwnd, &fs_) {
+                        self.notify("Copiado. Pegalo con Ctrl+V en Discord, WhatsApp o donde quieras.", false);
+                    }
+                }
+                204 => {
+                    let _ = Command::new("explorer.exe").raw_arg(format!("/select,\"{fs_}\"")).spawn();
+                }
+                205 => {
+                    // a la papelera (Windows pregunta antes)
+                    let from: Vec<u16> = fs_.encode_utf16().chain([0, 0]).collect();
+                    let hwnd = self.gallery.as_ref().map(|g| g.hwnd).unwrap_or(self.hwnd);
+                    let mut op = SHFILEOPSTRUCTW {
+                        hwnd,
+                        wFunc: FO_DELETE,
+                        pFrom: PCWSTR(from.as_ptr()),
+                        fFlags: FOF_ALLOWUNDO.0 as u16,
+                        ..Default::default()
+                    };
+                    unsafe {
+                        let _ = SHFileOperationW(&mut op);
+                    }
+                    self.fill_gallery();
+                }
+                _ => {}
+            }
+        }
+    }
+
+    unsafe extern "system" fn gallery_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+        match msg {
+            WM_SIZE => {
+                with_app(|a| a.layout_gallery());
+                LRESULT(0)
+            }
+            WM_GETMINMAXINFO => {
+                let mi = &mut *(lp.0 as *mut MINMAXINFO);
+                mi.ptMinTrackSize = POINT { x: 640, y: 320 };
+                LRESULT(0)
+            }
+            WM_COMMAND => {
+                let id = wp.0 & 0xFFFF;
+                with_app(|a| a.gallery_cmd(id));
+                LRESULT(0)
+            }
+            WM_NOTIFY => {
+                let h = &*(lp.0 as *const NMHDR);
+                if h.idFrom == 300 && h.code == NM_DBLCLK {
+                    with_app(|a| a.gallery_cmd(201));
+                }
+                DefWindowProcW(hwnd, msg, wp, lp)
+            }
+            WM_DESTROY => {
+                // cerrar con la X: se libera la ventana entera y Jugadón sigue en la bandeja
+                with_app(|a| {
+                    if let Some(g) = a.gallery.take() {
+                        let _ = DeleteObject(g.font.into());
+                    }
+                    a.share_token = None;
+                });
+                trim_ram();
+                LRESULT(0)
+            }
+            _ => DefWindowProcW(hwnd, msg, wp, lp),
         }
     }
 
@@ -1832,7 +2210,9 @@ mod app {
         match msg {
             WM_TRAY => {
                 let m = (lp.0 as u32) & 0xFFFF;
-                if m == WM_RBUTTONUP || m == WM_LBUTTONUP {
+                if m == WM_LBUTTONUP {
+                    with_app(|a| a.open_gallery());
+                } else if m == WM_RBUTTONUP {
                     show_menu(hwnd);
                 } else if m == NIN_BALLOONUSERCLICK {
                     with_app(|a| a.show_last_file());
@@ -1862,6 +2242,7 @@ mod app {
                     a.notify(&text, text.starts_with("No "));
                     if file.is_some() {
                         a.last_file = file;
+                        a.fill_gallery();
                     }
                 });
                 trim_ram();
@@ -1884,6 +2265,13 @@ mod app {
                 LRESULT(0)
             }
             _ => DefWindowProcW(hwnd, msg, wp, lp),
+        }
+    }
+
+    unsafe fn load_icon_size(hinst: HINSTANCE, id: usize, size: i32) -> HICON {
+        match LoadImageW(Some(hinst), PCWSTR(id as *const u16), IMAGE_ICON, size, size, LR_DEFAULTCOLOR) {
+            Ok(h) if !h.is_invalid() => HICON(h.0),
+            _ => make_icon(),
         }
     }
 
@@ -1980,6 +2368,19 @@ mod app {
             let class = w!("jugadon_tray");
             let wc = WNDCLASSW { lpfnWndProc: Some(wndproc), hInstance: hinst.into(), lpszClassName: class, ..Default::default() };
             RegisterClassW(&wc);
+            let _ = windows::Win32::UI::Controls::InitCommonControlsEx(&windows::Win32::UI::Controls::INITCOMMONCONTROLSEX {
+                dwSize: std::mem::size_of::<windows::Win32::UI::Controls::INITCOMMONCONTROLSEX>() as u32,
+                dwICC: windows::Win32::UI::Controls::ICC_LISTVIEW_CLASSES,
+            });
+            let gwc = WNDCLASSW {
+                lpfnWndProc: Some(gallery_proc),
+                hInstance: hinst.into(),
+                lpszClassName: w!("jugadon_gallery"),
+                hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
+                hbrBackground: HBRUSH((COLOR_WINDOW.0 + 1) as usize as _),
+                ..Default::default()
+            };
+            RegisterClassW(&gwc);
             TASKBAR_CREATED.store(RegisterWindowMessageW(w!("TaskbarCreated")), Ordering::Relaxed);
             let Ok(hwnd) = CreateWindowExW(WS_EX_TOOLWINDOW, class, w!("Jugadón"), WS_POPUP, 0, 0, 0, 0, None, None, Some(hinst.into()), None) else {
                 return;
@@ -2000,6 +2401,8 @@ mod app {
                 manual: None,
                 rec_dir: temp.join("jugadon_rec"),
                 menu_windows: Vec::new(),
+                gallery: None,
+                share_token: None,
                 rec: Rec {
                     child: None,
                     enc,

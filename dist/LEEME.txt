@@ -29,7 +29,10 @@ Los archivos van a: %USERPROFILE%\Videos\Jugadon
 Al guardar suena un "tin-tin" y aparece un aviso: tocalo para ver el clip.
 Menú -> "Copiar último clip" y lo pegás con Ctrl+V en Discord o WhatsApp.
 
-Clic en el ícono para abrir el menú. Ahí podés:
+Clic IZQUIERDO en el ícono: ventana "Mis clips" (abrir, compartir, copiar
+para Discord, borrar). Cerrala con la X: Jugadón sigue en la bandeja.
+
+Clic DERECHO en el ícono para abrir el menú. Ahí podés:
   - cambiar la duración (15 s a 5 min)
   - cambiar la calidad (480p 30 para PCs lentas, 720p 30 o 60 fps)
   - activar el micrófono o sacar el sonido (Opciones)
@@ -38,7 +41,8 @@ Clic en el ícono para abrir el menú. Ahí podés:
   - hacer que arranque con Windows
   - salir
 
-Graba la pantalla principal, el sonido del sistema y (opcional) el micrófono.
+Graba la pantalla principal, el sonido del sistema y el micrófono
+(el micrófono se apaga en el menú -> Opciones).
 Si algo no anda, mirá %TEMP%\jugadon.log
 Configuración: %APPDATA%\Jugadon\config.ini
 

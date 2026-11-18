@@ -1,10 +1,11 @@
 #pragma code_page(65001)
 1 ICON "jugadon.ico"
 2 ICON "jugadon_pausa.ico"
+1 24 "jugadon.manifest"
 
 1 VERSIONINFO
-FILEVERSION 0,6,0,0
-PRODUCTVERSION 0,6,0,0
+FILEVERSION 0,7,0,0
+PRODUCTVERSION 0,7,0,0
 FILEOS 0x40004
 FILETYPE 0x1
 BEGIN
@@ -14,8 +15,8 @@ BEGIN
     BEGIN
       VALUE "FileDescription", "Jugadón"
       VALUE "ProductName", "Jugadón"
-      VALUE "FileVersion", "0.6.0"
-      VALUE "ProductVersion", "0.6.0"
+      VALUE "FileVersion", "0.7.0"
+      VALUE "ProductVersion", "0.7.0"
       VALUE "OriginalFilename", "jugadon.exe"
       VALUE "LegalCopyright", "MIT"
     END

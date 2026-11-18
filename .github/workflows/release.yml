@@ -148,15 +148,15 @@ jobs:
       - name: Publicar release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.6.${{ github.run_number }}
-          name: Jugadón v0.6.${{ github.run_number }}
+          tag_name: v0.7.${{ github.run_number }}
+          name: Jugadón v0.7.${{ github.run_number }}
           target_commitish: ${{ github.sha }}
           prerelease: ${{ github.ref_name != github.event.repository.default_branch }}
           files: Jugadon-windows-x64.zip
           body: |
             Bajá **Jugadon-windows-x64.zip**, descomprimilo en una carpeta y abrí `jugadon.exe`.
             Aparece el ícono de Jugadón en la bandeja, al lado del reloj: **gris** = en pausa (sin juego), **naranja** = grabando.
-            **F9** guarda el clip, **F10** saca captura, **F8** graba/frena. Menú → "Grabar una ventana" graba solo esa ventana.
+            **F9** guarda el clip, **F10** saca captura, **F8** graba/frena. Clic en el ícono: ventana "Mis clips" para abrir, compartir o copiar. Clic derecho: menú.
             Instrucciones completas en el README del repo y en LEEME.txt dentro del zip.
 
             Compilado desde el commit ${{ github.sha }} (rama `${{ github.ref_name }}`).

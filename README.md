@@ -8,7 +8,8 @@ Clips de juegos para Windows 10/11, pensado para PCs de pocos recursos. Vive en 
 - ⏺️ **Grabación normal**: **F8** empieza a grabar la pantalla completa y **F8** la frena y la guarda.
 - 🪟 **Grabar una sola ventana** (el juego, el navegador, Discord, la que sea). Sale solo esa ventana, aunque tengas otra cosa adelante.
 - ⚡ **Hecho en Rust, todo el video en la placa.** El procesador queda para el juego.
-- 🔊 **Sonido del juego y, si querés, tu micrófono.**
+- 🔊 **Sonido del juego + tu micrófono** (el mic viene activado; se apaga en Opciones).
+- 🗂️ **Ventana "Mis clips"**: clic en el ícono y ves todos tus clips. Desde ahí los abrís, los compartís (con el menú Compartir de Windows), los copiás para Discord o los borrás.
 - 📋 **Copiar último clip**: lo pegás con Ctrl+V en Discord o WhatsApp.
 - 🔔 Aviso al guardar: tocalo y se abre el clip.
 
@@ -49,9 +50,22 @@ Los clips y capturas van a `Videos\Jugadon`. Al guardar suena un "tin-tin" y apa
 - Una ventana maximizada común (con la barra de tareas a la vista) no cuenta.
 - Después de salir del juego sigue 1 minuto más, así un alt-tab rápido no te borra el clip.
 
-### Menú (clic en el ícono)
+### Ventana "Mis clips" (clic izquierdo en el ícono)
+
+Lista tus clips, grabaciones y capturas, del más nuevo al más viejo. Botones:
+- **Abrir**: también con doble clic.
+- **Compartir…**: abre el menú Compartir de Windows (WhatsApp, correo, Compartir con dispositivos cercanos, etc.).
+- **Copiar**: después pegás con Ctrl+V en Discord o WhatsApp.
+- **Mostrar en carpeta**.
+- **Eliminar**: va a la papelera.
+- **Abrir carpeta**.
+
+Está hecha con los controles propios de Windows: no usa un navegador por dentro, como Electron. Solo existe mientras la tenés abierta: **al cerrarla con la X se libera entera** y Jugadón sigue en la bandeja sin consumir. No lee los videos para armar la lista; solo los nombres y las fechas.
+
+### Menú (clic derecho en el ícono)
 
 - Arriba de todo, el **estado**: grabando (y con qué encoder), en pausa o error.
+- **Ver mis clips…**: abre la ventana de arriba.
 - **Guardar clip** / **Captura**: lo mismo que las teclas.
 - **Grabar pantalla completa** / **Grabar una ventana ▸** / **Frenar y guardar grabación**.
 - **Copiar último clip**: después pegalo con Ctrl+V en Discord, WhatsApp, etc.
@@ -59,7 +73,7 @@ Los clips y capturas van a `Videos\Jugadon`. Al guardar suena un "tin-tin" y apa
 - **Duración del clip**: 15 s, 30 s, 1 min, 2 min o 5 min.
 - **Calidad**: 480p 30 fps (PC de bajos recursos), 720p 30 fps (por defecto) o 720p 60 fps. Vale para clips y grabaciones. Una ventana más chica se graba en su tamaño, sin agrandarla.
 - **Opciones**:
-  - **Grabar micrófono**: desactivado por defecto.
+  - **Grabar micrófono**: activado por defecto.
   - **Sonido al guardar**.
   - **Tecla de clip…** / **Tecla de captura…** / **Tecla de grabar/frenar…**: apretá la tecla nueva (se puede combinar con Ctrl, Alt o Shift). Esc cancela.
   - **Iniciar con Windows**.
