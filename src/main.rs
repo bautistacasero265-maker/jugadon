@@ -360,7 +360,7 @@ mod logic {
         }
         match out {
             Out::Segments { secs, dir } => {
-                a.extend(s(&["-f", "segment", "-segment_time", "2", "-segment_wrap"]));
+                a.extend(s(&["-flush_packets", "1", "-f", "segment", "-segment_time", "2", "-segment_wrap"]));
                 a.push(segment_wrap(secs).to_string());
                 a.extend(s(&["-segment_format", "mpegts"]));
                 a.push(format!("{dir}\\seg%03d.ts"));
@@ -1128,6 +1128,8 @@ mod app {
         src: Source,
         what: String,
         audio: bool,
+        /// ya se comprobó que ffmpeg está escribiendo el archivo
+        writing: bool,
     }
 
     struct App {
@@ -1351,6 +1353,11 @@ mod app {
                 post_text(format!("No pude pasar la grabación a mp4. Quedó en {}", ts.display()), None);
             }
         });
+    }
+
+    /// ¿ffmpeg ya escribió algo en el buffer de clips?
+    fn buf_has_data(dir: &Path) -> bool {
+        fs::read_dir(dir).is_ok_and(|rd| rd.flatten().any(|e| e.metadata().is_ok_and(|m| m.len() > 0)))
     }
 
     /// Aviso desde un hilo de trabajo: (texto, archivo creado).
@@ -1583,6 +1590,7 @@ mod app {
                 m.child = child;
                 m.audio = audio;
                 m.started = Instant::now();
+                m.writing = false;
             }
             self.set_tick(2000);
         }
@@ -1597,7 +1605,7 @@ mod app {
             let _ = fs::create_dir_all(&self.rec_dir);
             let ts = self.rec_dir.join(format!("grabacion_{}.ts", now_stamp()));
             let now = Instant::now();
-            self.manual = Some(Manual { child: None, enc: logic::first_encoder(self.cfg.encoder, self.cfg.gpu_only), tried: 0, started: now, t0: now, ts, src, what, audio: false });
+            self.manual = Some(Manual { child: None, enc: logic::first_encoder(self.cfg.encoder, self.cfg.gpu_only), tried: 0, started: now, t0: now, ts, src, what, audio: false, writing: false });
             self.spawn_manual();
             self.play_sound();
             let what = self.manual.as_ref().map(|m| m.what.clone()).unwrap_or_default();
@@ -1707,14 +1715,29 @@ mod app {
         fn tick_inner(&mut self) {
             let now = Instant::now();
             if let Some(m) = self.manual.as_mut() {
+                let mut stalled = false;
                 if let Some(c) = m.child.as_mut() {
                     if let Ok(None) = c.try_wait() {
-                        self.update_tip(); // muestra el tiempo grabado
-                        return;
+                        // ¿está escribiendo de verdad? Algunos drivers dejan a ffmpeg abierto sin sacar ningún cuadro
+                        if !m.writing && m.started.elapsed() >= QUICK_DEATH {
+                            if fs::metadata(&m.ts).is_ok_and(|x| x.len() > 0) {
+                                m.writing = true;
+                                log_line(&self.log_path, &format!("grabación escribiendo con {}", ENCODERS[m.enc].label));
+                            } else {
+                                log_line(&self.log_path, &format!("{} quedó abierto sin escribir nada: pruebo otra forma", ENCODERS[m.enc].label));
+                                let _ = c.kill();
+                                let _ = c.wait();
+                                stalled = true;
+                            }
+                        }
+                        if !stalled {
+                            self.update_tip(); // muestra el tiempo grabado
+                            return;
+                        }
                     }
                 }
-                // ffmpeg de la grabación manual terminó solo
-                let ran = m.child.as_ref().and_then(real_runtime).unwrap_or(Duration::ZERO);
+                // ffmpeg de la grabación manual terminó solo (o no escribía)
+                let ran = if stalled { Duration::ZERO } else { m.child.as_ref().and_then(real_runtime).unwrap_or(Duration::ZERO) };
                 log_line(&self.log_path, &format!("ffmpeg (grabación) terminó después de {} s con {}", ran.as_secs(), ENCODERS[m.enc].label));
                 match logic::next_encoder(m.enc, m.tried, self.cfg.gpu_only) {
                     Some((e, t)) if ran < QUICK_DEATH => {
@@ -1751,6 +1774,16 @@ mod app {
             }
             if let Some(c) = self.rec.child.as_mut() {
                 let status = match c.try_wait() {
+                    Ok(None) if !self.rec.good && self.rec.started.elapsed() >= QUICK_DEATH && !buf_has_data(&self.buf_dir) => {
+                        // abierto pero sin escribir nada (driver que se cuelga): se espera un poco y si no, a otra forma
+                        if self.rec.started.elapsed() < Duration::from_secs(12) {
+                            return;
+                        }
+                        log_line(&self.log_path, &format!("{} quedó abierto sin escribir nada: pruebo otra forma", ENCODERS[self.rec.enc].label));
+                        let _ = c.kill();
+                        let _ = c.wait();
+                        "sin escribir".to_string()
+                    }
                     Ok(None) => {
                         if !self.rec.good && self.rec.started.elapsed() >= QUICK_DEATH {
                             self.rec.good = true;
@@ -1768,7 +1801,11 @@ mod app {
                     Ok(Some(s)) => format!("{s}"),
                     Err(e) => format!("{e}"),
                 };
-                let ran = self.rec.child.as_ref().and_then(real_runtime).unwrap_or_else(|| self.rec.started.elapsed());
+                let ran = if status == "sin escribir" {
+                    Duration::ZERO
+                } else {
+                    self.rec.child.as_ref().and_then(real_runtime).unwrap_or_else(|| self.rec.started.elapsed())
+                };
                 log_line(&self.log_path, &format!("ffmpeg terminó ({status}) después de {} s", ran.as_secs()));
                 self.rec.child = None;
                 if ran >= QUICK_DEATH {
@@ -2049,6 +2086,7 @@ mod app {
                 add(o, 32, "Tecla de grabar/frenar…", false);
                 sep(o);
                 add(o, 41, "Iniciar con Windows", autostart_enabled());
+                add(o, 42, "Ver registro (si algo no anda)", false);
                 let t = wide("Opciones");
                 let _ = AppendMenuW(m, MF_POPUP, o.0 as usize, PCWSTR(t.as_ptr()));
                 sep(m);
@@ -2132,6 +2170,12 @@ mod app {
                     }
                 }
                 41 => set_autostart(!autostart_enabled()),
+                42 => {
+                    if !self.log_path.exists() {
+                        log_line(&self.log_path, "registro abierto desde el menú");
+                    }
+                    let _ = Command::new("notepad.exe").arg(&self.log_path).spawn();
+                }
                 50 => return true,
                 _ => {}
             }

@@ -125,6 +125,10 @@ try {
   Get-Content $log -ErrorAction SilentlyContinue | Select-String 'iniciando|grabando con|terminó|audio' | Select-Object -Last 30 | ForEach-Object { Write-Host "         log: $($_.Line)" }
   Check (-not (Get-Process ffmpeg -ErrorAction SilentlyContinue | Where-Object { $_.PriorityClass -notin 'BelowNormal', 'Idle' })) "ffmpeg corre con prioridad baja"
   Alive "arranque"
+  $np0 = @(Get-Process notepad -ErrorAction SilentlyContinue).Count
+  Cmd 42
+  Check (Wait-Until { @(Get-Process notepad -ErrorAction SilentlyContinue).Count -gt $np0 } 10) "menú → Ver registro abre el Bloc de notas"
+  Get-Process notepad -ErrorAction SilentlyContinue | Stop-Process -Force
 
   Step "2. Teclas con la ventana cerrada: F9 clip, F10 captura, F8 grabar/frenar"
   Start-Sleep -Seconds 18

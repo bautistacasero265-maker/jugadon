@@ -108,7 +108,7 @@ Si pasás el mouse por el ícono, te dice cuál está usando. Con drivers sin la
 - **Dice que la placa no puede comprimir**: solo pasa si activaste Opciones → Nunca usar el procesador. Desactivalo, o actualizá el driver de video.
 - **Otro programa usa F9, F8 o F10**: Jugadón avisa; cambiá la tecla desde Opciones.
 - **Un juego en pantalla completa exclusiva sale negro**: ponelo en "ventana sin bordes".
-- **Cualquier otra cosa**: mirá `%TEMP%\jugadon.log`.
+- **Cualquier otra cosa**: menú → Opciones → **Ver registro (si algo no anda)**. Se abre el registro en el Bloc de notas; copialo y mandalo cuando pidas ayuda.
 
 ## Límites
 
