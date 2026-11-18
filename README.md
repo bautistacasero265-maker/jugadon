@@ -11,7 +11,9 @@
 - 🗂️ **Ventana "Mis clips"** con miniaturas: abrís, compartís (con el menú Compartir de Windows), copiás para pegar en Discord o WhatsApp, o borrás.
 - ⚡ **El video lo comprime la placa de video** (NVENC, AMF, Quick Sync o, si el driver es viejo, a través de Windows), no el procesador. Sin juego abierto queda en pausa y no consume nada.
 - 🌍 **Anda con cualquier placa y cualquier driver** en Windows 10 y 11: al abrirla prueba sola qué forma de usar tu placa graba de verdad y se queda con esa.
-- 🔒 **No se conecta a internet** ni manda datos a ningún lado. Tus clips quedan solo en tu PC.
+- 🔗 **Compartir por link**: tocás compartir y el link queda copiado; lo abre cualquiera, tenga o no Jugadón.
+- ✂️ **Tocás un clip y lo ves y recortás ahí mismo**, al instante y sin perder calidad.
+- 🔒 **Sin cuentas y sin datos**: solo se conecta a internet cuando vos tocás "Copiar link"; tus clips quedan en tu PC.
 
 <p align="center"><img src="assets/captura_ventana.png" alt="Ventana Mis clips" width="85%"></p>
 
@@ -57,6 +59,8 @@ Se abre con **clic izquierdo** en el ícono (o con `jugadon.exe --clips`, útil 
 
 - **Barra lateral**: secciones Todo / Clips / Grabaciones / Capturas con su cantidad, botón grande **Grabar pantalla** (se pone rojo con el reloj mientras grabás y sirve para frenar), **Guardar clip**, **Abrir carpeta**, **Ajustes** (el mismo menú del ícono) y el estado actual.
 - **Tarjetas grandes** con miniatura, etiqueta de color (clip, grabación, captura) y duración. Al pasar el mouse aparecen el botón **▶** y los botones rápidos **Compartir**, **Copiar** (para pegar con Ctrl+V en Discord o WhatsApp) y **Eliminar** (va a la papelera).
+- **Un toque en un clip lo abre en el visor/editor**: se ve con el reproductor de Windows (decodifica la placa), y arrastrando las manijas amarillas de la barra elegís qué parte guardar (**Guardar recorte**, una copia instantánea sin recomprimir). Espacio pausa, flechas adelantan 5 s, I y O marcan inicio y fin, Esc cierra. Desde ahí también: Copiar link, Para Discord y abrirlo en el reproductor de Windows.
+- **Copiar link** (el botón 🔗 de la tarjeta): sube el clip a catbox.moe, un servicio gratuito sin cuenta, y deja el link copiado. Lo abre cualquiera en el navegador, en Discord o en WhatsApp, tenga o no la app. **Se borra solo a los 3 días**; con clic derecho → "Copiar link permanente" queda para siempre (hasta 200 MB). Si el mismo clip ya tiene link, lo copia al instante sin volver a subirlo.
 - **Clic derecho** en una tarjeta:
   - **Favorito ⭐**: aparecen en la sección Favoritos y la limpieza automática nunca los borra.
   - **Renombrar** (o F2): le ponés nombre a la jugada ("ace en Valorant"), sin perder la fecha.

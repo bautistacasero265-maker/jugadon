@@ -77,7 +77,7 @@ jobs:
 
             Texto sugerido para la publicación:
 
-            > ¿Te pasó de hacer la jugada de tu vida y no estar grabando? 😭 Jugadón guarda los últimos 30 segundos con una tecla, lo comprime tu placa de video y no te baja los FPS. Gratis, sin cuentas y sin internet. Link en la bio 🎮
+            > ¿Te pasó de hacer la jugada de tu vida y no estar grabando? 😭 Jugadón guarda los últimos 30 segundos con una tecla, lo comprime tu placa de video y no te baja los FPS. Recortás mientras lo ves y compartís un link que abre cualquiera. Gratis y sin cuentas. Link en la bio 🎮
             > #gaming #clips #pcgaming #valorant #fortnite #cs2 #setup #gamer #parati #fyp
 
             Música, efectos, imágenes y voz generados automáticamente (voz: Piper TTS). La app real se descarga desde [Releases](https://github.com/${{ github.repository }}/releases/latest).

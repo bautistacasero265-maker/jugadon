@@ -52,9 +52,9 @@ SCRIPT = [
     ("Lo comprime tu placa de video, así el juego no pierde efe pe ese.", "Lo comprime tu placa de video: el juego no pierde FPS", "gpu"),
     ("Y en reposo no consume casi nada. Está hecho en Rost.", "En reposo no consume casi nada. Hecho en Rust", "light"),
     ("Todos tus clips quedan ordenados, listos para compartir.", "Todos tus clips ordenados, listos para compartir", "gallery"),
-    ("Los achicás para Discord, los recortás y les ponés nombre.", "Achicalos para Discord, recortalos y ponerles nombre", "features"),
+    ("Los recortás mientras los ves, y con un toque copiás un link que abre cualquiera.", "Recortalos mientras los ves y copiá un link que abre cualquiera", "features"),
     ("Con efe ocho grabás la pantalla, o una sola ventana.", "Con F8 grabás la pantalla o una sola ventana", "f8"),
-    ("Es gratis. Sin cuentas, y sin internet.", "Gratis. Sin cuentas y sin internet", "free"),
+    ("Es gratis. Sin cuentas, y sin publicidad.", "Gratis. Sin cuentas y sin publicidad", "free"),
     ("Bajalo ya. El link está en la bio.", "Bajalo ya: link en la bio", "cta"),
 ]
 
@@ -425,10 +425,10 @@ def sc_gallery(img, t, p, shot):
 
 def sc_features(img, t, p):
     d = ImageDraw.Draw(img)
-    items = [("Achicar para Discord", "menos de 10 MB, sin Nitro", (88, 101, 242)),
-             ("Recortar", "sin perder calidad", ORANGE),
-             ("Renombrar", "\"ace en Valorant\"", PINK),
-             ("Favoritos", "tus mejores jugadas", (255, 196, 0))]
+    items = [("Ver y recortar", "mientras lo mirás, al instante", ORANGE),
+             ("Copiar link", "lo abre cualquiera, sin la app", PINK),
+             ("Achicar para Discord", "menos de 10 MB, sin Nitro", (88, 101, 242)),
+             ("Favoritos y nombres", "\"ace en Valorant\"", (255, 196, 0))]
     for i, (a, b, c) in enumerate(items):
         k = ease_back((t - i * 0.32) / 0.3)
         if k <= 0:
@@ -458,7 +458,7 @@ def sc_free(img, t, p):
     s = ease_back(t / 0.35)
     if s > 0:
         gradient_text(img, 470, "GRATIS", max(10, int(230 * min(s, 1.1))))
-    for i, w_ in enumerate(["sin cuentas", "sin internet", "sin marca de agua"]):
+    for i, w_ in enumerate(["sin cuentas", "sin publicidad", "sin marca de agua"]):
         k = ease_out((t - 0.4 - i * 0.25) / 0.3)
         if k > 0:
             chip(d, W // 2, 860 + i * 150 + int(40 * (1 - k)), "✓  " + w_, 52, fill=(30, 70, 50), color=(170, 255, 200))

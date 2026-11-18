@@ -453,6 +453,26 @@ mod logic {
         s(&["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-ss", &from, "-i", input, "-map", "0", "-c", "copy", "-avoid_negative_ts", "make_zero", "-movflags", "+faststart", out])
     }
 
+    /// Recorte exacto elegido en el visor: desde `from` hasta `to` segundos, sin recomprimir.
+    pub fn cut_args(input: &str, from: f64, to: f64, out: &str) -> Vec<String> {
+        let (a, d) = (format!("{:.2}", from.max(0.0)), format!("{:.2}", (to - from).max(0.1)));
+        s(&["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-ss", &a, "-i", input, "-t", &d, "-map", "0", "-c", "copy", "-avoid_negative_ts", "make_zero", "-movflags", "+faststart", out])
+    }
+
+    /// Subir un clip para compartirlo por link (curl.exe viene con Windows 10/11).
+    /// Temporal: litterbox (se borra solo a las 72 h, hasta 1 GB). Permanente: catbox (hasta 200 MB).
+    pub fn upload_args(path: &str, permanent: bool) -> Vec<String> {
+        // curl interpreta "\" adentro de las comillas: la ruta va con barras normales (Windows las acepta)
+        let file = format!("fileToUpload=@\"{}\"", path.replace('\\', "/"));
+        let mut a = s(&["-sS", "-f", "--retry", "2", "--max-time", "1800", "-F", "reqtype=fileupload"]);
+        if !permanent {
+            a.extend(s(&["-F", "time=72h"]));
+        }
+        a.extend(["-F".to_string(), file]);
+        a.push(if permanent { "https://catbox.moe/user/api.php" } else { "https://litterbox.catbox.moe/resources/internals/api.php" }.to_string());
+        a
+    }
+
     /// Nombre de una copia: "clip_X.mp4" + "sin10s" -> "clip_X_sin10s.mp4" (el título personalizado se mantiene al final).
     pub fn derived_name(name: &str, tag: &str) -> String {
         let stem = name.rsplit_once('.').map_or(name, |x| x.0);
@@ -921,6 +941,10 @@ mod logic {
             let r = remux_args("a.ts", "b.mp4").join(" ");
             assert!(r.contains("-i a.ts -map 0 -c copy -movflags +faststart b.mp4"));
             assert_eq!(fmt_elapsed(187), "3:07");
+            assert!(cut_args("a.mp4", 1.5, 4.0, "b.mp4").join(" ").contains("-ss 1.50 -i a.mp4 -t 2.50 -map 0 -c copy"));
+            let u = upload_args("C:\\V\\clip a.mp4", false).join(" ");
+            assert!(u.contains("-F time=72h -F fileToUpload=@\"C:/V/clip a.mp4\" https://litterbox.catbox.moe/"));
+            assert!(upload_args("x.mp4", true).last().unwrap().starts_with("https://catbox.moe/"));
             assert!(trim_start_args("a.mp4", 10, "b.mp4").join(" ").contains("-ss 10 -i a.mp4 -map 0 -c copy"));
             assert_eq!(derived_name("clip_X.mp4", "sin10s"), "clip_X_sin10s.mp4");
             assert_eq!(derived_name("clip_X - ace.mp4", "discord"), "clip_X_discord - ace.mp4");
@@ -1246,6 +1270,8 @@ mod app {
     const WM_BIND: u32 = WM_APP + 3;
     /// terminó la prueba de cómo grabar (wParam = encoder que anduvo, o usize::MAX)
     const WM_PROBED: u32 = WM_APP + 4;
+    /// terminó de subir un clip: lParam = Box<(nombre, link o error, vence, permanente)>
+    const WM_LINK: u32 = WM_APP + 5;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     // El juego siempre gana la CPU: grabar en "debajo de lo normal", guardar/capturar en "baja".
     const BELOW_NORMAL: u32 = 0x0000_4000;
@@ -1310,11 +1336,15 @@ mod app {
         menu_windows: Vec<(HWND, String)>,
         /// ventana "Mis clips": solo existe mientras está abierta (cerrarla libera todo)
         gallery: Option<Gallery>,
+        /// visor/editor de un clip: solo existe mientras está abierto
+        viewer: Option<Viewer>,
         share_token: Option<i64>,
         /// intervalo actual del watchdog: 2 s grabando, 10 s en reposo
         tick_ms: u32,
         /// probando en segundo plano qué forma de grabar anda en esta PC
         probing: bool,
+        /// clips que se están subiendo para compartir (no subir dos veces el mismo)
+        uploading: std::collections::HashSet<String>,
         rec: Rec,
         binding: u8,
         hook: Option<HHOOK>,
@@ -1412,6 +1442,33 @@ mod app {
             }
             let _ = EmptyClipboard();
             let ok = SetClipboardData(15 /* CF_HDROP */, Some(HANDLE(h.0))).is_ok();
+            let _ = CloseClipboard();
+            if !ok {
+                let _ = GlobalFree(Some(h));
+            }
+            ok
+        }
+    }
+
+    fn copy_text_to_clipboard(hwnd: HWND, text: &str) -> bool {
+        use windows::Win32::System::DataExchange::*;
+        use windows::Win32::System::Memory::*;
+        let w: Vec<u16> = text.encode_utf16().chain([0]).collect();
+        unsafe {
+            let Ok(h) = GlobalAlloc(GMEM_MOVEABLE, w.len() * 2) else { return false };
+            let p = GlobalLock(h) as *mut u16;
+            if p.is_null() {
+                let _ = GlobalFree(Some(h));
+                return false;
+            }
+            std::ptr::copy_nonoverlapping(w.as_ptr(), p, w.len());
+            let _ = GlobalUnlock(h);
+            if OpenClipboard(Some(hwnd)).is_err() {
+                let _ = GlobalFree(Some(h));
+                return false;
+            }
+            let _ = EmptyClipboard();
+            let ok = SetClipboardData(13 /* CF_UNICODETEXT */, Some(HANDLE(h.0))).is_ok();
             let _ = CloseClipboard();
             if !ok {
                 let _ = GlobalFree(Some(h));
@@ -1847,6 +1904,81 @@ mod app {
                     remux_in_background(self.ffmpeg.clone(), self.log_path.clone(), p, dir.join(name), msg);
                 }
             }
+        }
+
+        fn links_path(&self) -> PathBuf {
+            self.cfg_path.with_file_name("links.txt")
+        }
+
+        /// Link ya subido de este archivo que todavía no venció: "nombre\tlink\tvence (unix, 0 = nunca)".
+        fn cached_link(&self, name: &str, permanent: bool) -> Option<String> {
+            let now = std::time::SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
+            let text = fs::read_to_string(self.links_path()).ok()?;
+            text.lines().rev().find_map(|l| {
+                let mut it = l.split('\t');
+                let (n, url, exp) = (it.next()?, it.next()?, it.next()?.parse::<u64>().ok()?);
+                // un link temporal sirve si le queda al menos 1 hora; uno permanente sirve siempre
+                let ok = n == name && (exp == 0 || (!permanent && exp > now + 3600));
+                ok.then(|| url.to_string())
+            })
+        }
+
+        /// Compartir por link: sube el clip y copia el link al portapapeles. Lo ve cualquiera, tenga o no la app.
+        fn share_link(&mut self, f: PathBuf, permanent: bool) {
+            let name = f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            if let Some(url) = self.cached_link(&name, permanent) {
+                copy_text_to_clipboard(self.hwnd, &url);
+                self.notify(&format!("Link copiado al portapapeles: {url}\nPegalo donde quieras."), false);
+                return;
+            }
+            if !self.uploading.insert(name.clone()) {
+                self.notify("Ese clip ya se está subiendo: en un ratito tenés el link.", false);
+                return;
+            }
+            let size = fs::metadata(&f).map(|m| m.len()).unwrap_or(0);
+            let limit: u64 = if permanent { 200 << 20 } else { 1 << 30 };
+            if size > limit {
+                self.uploading.remove(&name);
+                self.notify(&format!("Es muy grande para un link ({}; máximo {}). Probá \"Achicar para Discord\" o recortalo.", logic::fmt_size(size), logic::fmt_size(limit)), true);
+                return;
+            }
+            self.notify(&format!("Subiendo el clip ({}) para compartirlo… Cuando termine, el link queda copiado.", logic::fmt_size(size)), false);
+            let log = self.log_path.clone();
+            let curl = std::env::var("SystemRoot").map(|r| PathBuf::from(r).join("System32").join("curl.exe")).unwrap_or_else(|_| PathBuf::from("curl.exe"));
+            std::thread::spawn(move || {
+                let args = logic::upload_args(&f.to_string_lossy(), permanent);
+                let mut cmd = Command::new(curl);
+                cmd.args(&args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(log_stdio(&log));
+                let out = spawn_hidden(&mut cmd, BELOW_NORMAL).and_then(|c| c.wait_with_output());
+                let text = out.as_ref().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
+                let ok = out.as_ref().is_ok_and(|o| o.status.success()) && text.starts_with("https://");
+                log_line(&log, &format!("compartir link: {}", if ok { text.as_str() } else { "falló" }));
+                let now = std::time::SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
+                let exp = if permanent { 0 } else { now + 72 * 3600 };
+                let msg = Box::new((name, if ok { text } else { String::new() }, exp, permanent));
+                unsafe {
+                    let raw = Box::into_raw(msg);
+                    if PostMessageW(Some(HWND(MAIN_HWND.load(Ordering::Relaxed) as _)), WM_LINK, WPARAM(0), LPARAM(raw as isize)).is_err() {
+                        drop(Box::from_raw(raw));
+                    }
+                }
+            });
+        }
+
+        fn link_done(&mut self, name: String, url: String, exp: u64, permanent: bool) {
+            self.uploading.remove(&name);
+            if url.is_empty() {
+                self.notify("No pude subir el clip (¿hay internet?). Probá de nuevo en un rato.", true);
+                return;
+            }
+            let _ = fs::OpenOptions::new().create(true).append(true).open(self.links_path()).and_then(|mut f| {
+                use std::io::Write;
+                writeln!(f, "{name}\t{url}\t{exp}")
+            });
+            copy_text_to_clipboard(self.hwnd, &url);
+            self.play_sound();
+            let when = if permanent { "no vence" } else { "se borra solo en 3 días" };
+            self.notify(&format!("¡Link copiado al portapapeles! Pegalo donde quieras: lo ve cualquiera, tenga o no Jugadón ({when}).\n{url}"), false);
         }
 
         fn fav_path(&self) -> PathBuf {
@@ -2648,7 +2780,7 @@ mod app {
                     icon_big: font(22, 400, ic),
                 };
                 // hilo de miniaturas: vive mientras la ventana está abierta (se corta al soltar el Sender)
-                let (tx, rx) = std::sync::mpsc::channel::<(u64, usize, PathBuf)>();
+                let (tx, rx) = std::sync::mpsc::channel::<ThumbReq>();
                 start_thumb_thread(hwnd, rx);
                 self.gallery = Some(Gallery {
                     hwnd,
@@ -2672,6 +2804,7 @@ mod app {
                     drag: None,
                     tracking: false,
                     focus: None,
+                    target: None,
                     favs: std::collections::HashSet::new(),
                     edit: None,
                     edit_brush: CreateSolidBrush(COLORREF(rgb(52, 46, 72))),
@@ -2707,7 +2840,10 @@ mod app {
             files.sort_by_key(|f| std::cmp::Reverse(f.0));
             files.truncate(3000);
             let sel_path = g.sel.and_then(|i| g.items.get(i)).map(|it| it.path.clone());
-            g.free_thumbs();
+            // las miniaturas que ya estaban se reusan: al borrar o guardar un clip no "parpadea" nada
+            type Kept = (HBITMAP, Option<u32>, (i32, i32));
+            let mut keep: std::collections::HashMap<PathBuf, Kept> =
+                g.items.iter_mut().filter_map(|it| Some((it.path.clone(), (it.thumb.take()?, it.dur, it.tsize)))).collect();
             g.gen += 1;
             g.items = files
                 .into_iter()
@@ -2725,9 +2861,15 @@ mod app {
                         None if date.is_empty() => name.clone(),
                         None => format!("{kind} del {date}"),
                     };
-                    Item { path, name, kind: k, title, size: len, dur: None, thumb: None, asked: false }
+                    let (thumb, dur, tsize) = keep.remove(&path).map_or((None, None, (0, 0)), |(b, d, t)| (Some(b), d, t));
+                    Item { path, name, kind: k, title, size: len, dur, asked: false, thumb, tsize }
                 })
                 .collect();
+            for (_, (b, _, _)) in keep {
+                unsafe {
+                    let _ = DeleteObject(b.into());
+                }
+            }
             g.counts = [0; 4];
             for it in &g.items {
                 g.counts[it.kind as usize] += 1;
@@ -2747,6 +2889,13 @@ mod app {
                 self.notify("Elegí un clip de la lista primero.", false);
                 return;
             };
+            let dur = self.gallery.as_ref().and_then(|g| g.items.get(g.sel?)?.dur);
+            self.copy_of(f, op, secs as f64, 0.0, dur);
+        }
+
+        /// op: 0 = últimos `a` s, 1 = sin los primeros `a` s, 2 = para Discord, 3 = recorte de `a` a `b` s.
+        fn copy_of(&self, f: PathBuf, op: u8, a: f64, b: f64, dur: Option<u32>) {
+            let secs = a as u32;
             if !f.extension().is_some_and(|x| x.eq_ignore_ascii_case("mp4")) {
                 self.notify("Esto es solo para videos.", false);
                 return;
@@ -2755,11 +2904,11 @@ mod app {
             let tag = match op {
                 0 => format!("ultimos{secs}s"),
                 1 => format!("sin{secs}s"),
+                3 => "recorte".to_string(),
                 _ => "discord".to_string(),
             };
             let out = f.with_file_name(logic::derived_name(&name, &tag));
             let (ffmpeg, log, enc) = (self.ffmpeg.clone(), self.log_path.clone(), self.cfg.encoder.min(ENCODERS.len() - 1));
-            let dur = self.gallery.as_ref().and_then(|g| g.items.get(g.sel?)?.dur);
             if op == 2 {
                 self.notify("Achicando el clip para Discord (lo comprime la placa, puede tardar unos segundos)…", false);
             }
@@ -2768,6 +2917,7 @@ mod app {
                 let args = match op {
                     0 => logic::trim_args(&src, secs, &dst),
                     1 => logic::trim_start_args(&src, secs, &dst),
+                    3 => logic::cut_args(&src, a, b, &dst),
                     _ => logic::discord_args(enc, &src, dur.unwrap_or(60), &dst),
                 };
                 let mut cmd = Command::new(ffmpeg);
@@ -2778,6 +2928,7 @@ mod app {
                     let msg = match op {
                         0 => format!("Listo: quedaron los últimos {secs} s en un clip nuevo (el original no se tocó)."),
                         1 => format!("Listo: copia sin los primeros {secs} s (el original no se tocó)."),
+                        3 => format!("Recorte guardado ({}): {}", logic::fmt_elapsed((b - a).round() as u64), out.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()),
                         _ if size > 10 << 20 => format!("Copia para Discord lista, pero quedó de {} (el clip es muy largo: acortalo primero).", logic::fmt_size(size)),
                         _ => format!("Copia para Discord lista ({}): copiala y pegala en Discord.", logic::fmt_size(size)),
                     };
@@ -2949,13 +3100,19 @@ mod app {
             };
             let fs_ = f.to_string_lossy().into_owned();
             match id {
-                201 => {
+                201 if f.extension().is_some_and(|x| x.eq_ignore_ascii_case("mp4")) => {
+                    let (title, dur) = self.gallery.as_ref().and_then(|g| g.items.get(g.sel?)).map(|it| (it.title.clone(), it.dur)).unwrap_or_default();
+                    self.open_viewer(f.clone(), title, dur);
+                }
+                201 | 272 => {
                     let p = wide(&fs_);
                     unsafe {
                         ShellExecuteW(None, w!("open"), PCWSTR(p.as_ptr()), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL);
                     }
                 }
-                202 => {
+                202 => self.share_link(f.clone(), false),
+                270 => self.share_link(f.clone(), true),
+                271 => {
                     let hwnd = self.gallery.as_ref().map(|g| g.hwnd).unwrap_or(self.hwnd);
                     let mut token = self.share_token.take();
                     let r = share_file(hwnd, fs_.clone(), &mut token);
@@ -2980,13 +3137,14 @@ mod app {
                         hwnd,
                         wFunc: FO_DELETE,
                         pFrom: PCWSTR(from.as_ptr()),
-                        fFlags: FOF_ALLOWUNDO.0 as u16,
+                        fFlags: (FOF_ALLOWUNDO.0 | FOF_NOCONFIRMATION.0 | FOF_SILENT.0) as u16,
                         ..Default::default()
                     };
                     unsafe {
                         let _ = SHFileOperationW(&mut op);
                     }
                     if !f.exists() {
+                        self.notify("Mandado a la papelera (si te arrepentiste, lo recuperás de ahí).", false);
                         let name = f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                         let mut favs = self.load_favs();
                         if favs.remove(&name) {
@@ -3016,9 +3174,10 @@ mod app {
             match hit {
                 Hit::Nav(n) => g.set_nav(n),
                 Hit::Card(i) => {
+                    // un toque en el clip lo abre para verlo y editarlo (el doble clic no lo abre dos veces)
                     g.sel = Some(i);
                     g.redraw();
-                    if double {
+                    if !double {
                         self.gallery_cmd(201);
                     }
                 }
@@ -3062,7 +3221,7 @@ mod app {
         }
 
         /// Llega una miniatura (y la duración del video) del hilo de fondo.
-        fn add_thumb(&mut self, gen: u64, idx: usize, bmp: HBITMAP, dur: Option<u32>) {
+        fn add_thumb(&mut self, gen: u64, idx: usize, bmp: HBITMAP, dur: Option<u32>, size: (i32, i32)) {
             let Some(g) = self.gallery.as_mut() else {
                 unsafe {
                     let _ = DeleteObject(bmp.into());
@@ -3070,9 +3229,20 @@ mod app {
                 return;
             };
             match g.items.get_mut(idx) {
-                Some(it) if gen == g.gen && it.thumb.is_none() => {
-                    it.thumb = (!bmp.is_invalid()).then_some(bmp);
-                    it.dur = dur;
+                Some(it) if gen == g.gen && !bmp.is_invalid() => {
+                    // reemplaza la anterior (si era de otro tamaño)
+                    if let Some(old) = it.thumb.replace(bmp) {
+                        unsafe {
+                            let _ = DeleteObject(old.into());
+                        }
+                    }
+                    it.tsize = size;
+                    it.asked = false;
+                    it.dur = dur.or(it.dur);
+                }
+                Some(it) if gen == g.gen => {
+                    it.dur = dur.or(it.dur);
+                    return;
                 }
                 _ => unsafe {
                     let _ = DeleteObject(bmp.into());
@@ -3116,6 +3286,8 @@ mod app {
         size: u64,
         dur: Option<u32>,
         thumb: Option<HBITMAP>,
+        /// tamaño de la miniatura (se pide del tamaño de la tarjeta: se dibuja sin escalar)
+        tsize: (i32, i32),
         asked: bool,
     }
 
@@ -3154,11 +3326,13 @@ mod app {
         hits: Vec<(RECT, Hit)>,
         visible: Vec<usize>,
         gen: u64,
-        tx: Option<std::sync::mpsc::Sender<(u64, usize, PathBuf)>>,
+        tx: Option<std::sync::mpsc::Sender<ThumbReq>>,
         drag: Option<i32>,
         tracking: bool,
         /// foco del teclado (Tab): sección, botón o las tarjetas (Card(usize::MAX))
         focus: Option<Hit>,
+        /// destino del desplazamiento suave
+        target: Option<i32>,
         /// nombres de archivo marcados como favoritos
         favs: std::collections::HashSet<String>,
         /// cuadro de texto para renombrar (control, tarjeta)
@@ -3167,8 +3341,8 @@ mod app {
     }
 
     const NAV: [(&str, u16); 5] = [("Todo", 0xE8A9), ("Clips", 0xE714), ("Grabaciones", 0xE7C8), ("Capturas", 0xEB9F), ("Favoritos", 0xE734)];
-    const THUMB_W: i32 = 320;
-    const THUMB_H: i32 = 180;
+    /// pedido de miniatura: (generación, índice, archivo, ancho, alto) — se hace del tamaño exacto de la tarjeta
+    type ThumbReq = (u64, usize, PathBuf, i32, i32);
     /// miniaturas en memoria como máximo (las que no se ven se sueltan)
     const THUMB_CAP: usize = 36;
 
@@ -3261,12 +3435,36 @@ mod app {
             (self.content_h - self.page_h).max(0)
         }
 
+        /// Desplazamiento suave: se fija el destino y un timer de 15 ms se acerca (solo mientras se mueve).
         fn scroll_by(&mut self, dy: i32) {
-            let s = (self.scroll + dy).clamp(0, self.max_scroll());
-            if s != self.scroll {
-                self.scroll = s;
-                self.redraw();
+            let base = self.target.unwrap_or(self.scroll);
+            let t = (base + dy).clamp(0, self.max_scroll());
+            if t != self.scroll {
+                self.target = Some(t);
+                unsafe {
+                    SetTimer(Some(self.hwnd), 2, 15, None);
+                }
             }
+        }
+
+        fn scroll_step(&mut self) {
+            let Some(t) = self.target else {
+                unsafe {
+                    let _ = KillTimer(Some(self.hwnd), 2);
+                }
+                return;
+            };
+            let d = t - self.scroll;
+            if d.abs() <= 2 {
+                self.scroll = t;
+                self.target = None;
+                unsafe {
+                    let _ = KillTimer(Some(self.hwnd), 2);
+                }
+            } else {
+                self.scroll += (d as f32 * 0.35) as i32 + d.signum();
+            }
+            self.redraw();
         }
 
         /// Arrastrar la barra de desplazamiento.
@@ -3538,7 +3736,8 @@ mod app {
                 }
                 self.visible.push(idx);
                 let it = &self.items[idx];
-                if it.thumb.is_none() && !it.asked {
+                // sin miniatura, o de otro tamaño (se agrandó la ventana): se pide de nuevo, del tamaño justo
+                if !it.asked && (it.thumb.is_none() || it.tsize != (cw, th)) {
                     asks.push(idx);
                 }
                 let r = rc(x, y, x + cw, y + ch);
@@ -3562,7 +3761,7 @@ mod app {
                 SelectClipRgn(dc, Some(clip));
                 fill(dc, tr, THUMB_BG);
                 match it.thumb {
-                    Some(b) => blit_cover(dc, b, tr),
+                    Some(b) => blit_cover(dc, b, it.tsize, tr),
                     None => {
                         let sz = th / 3;
                         let _ = DrawIconEx(dc, (tr.left + tr.right - sz) / 2, (tr.top + tr.bottom - sz) / 2, self.logo, sz, sz, 0, None, DI_NORMAL);
@@ -3612,7 +3811,7 @@ mod app {
                     self.hits.push((play, Hit::Play(idx)));
                     let mut ax = tr.right - s(10);
                     let star = if self.favs.contains(&self.items[idx].name) { 0xE735u16 } else { 0xE734 };
-                    for (cmd, glyph) in [(205usize, 0xE74Du16), (203, 0xE8C8), (202, 0xE72D), (208, star)] {
+                    for (cmd, glyph) in [(205usize, 0xE74Du16), (203, 0xE8C8), (202, 0xE71B), (208, star)] {
                         let ar = rc(ax - s(32), tr.top + s(8), ax, tr.top + s(40));
                         let ah = self.hover == Hit::Act(idx, cmd);
                         if ah {
@@ -3631,7 +3830,7 @@ mod app {
                                 205 => "Eliminar",
                                 203 => "Copiar",
                                 208 => "Favorito",
-                                _ => "Compartir",
+                                _ => "Copiar link",
                             };
                             let lw = text_w(dc, self.fonts.small, label) + s(16);
                             let lr = rc((ar.left + ar.right - lw) / 2, ar.bottom + s(6), (ar.left + ar.right + lw) / 2, ar.bottom + s(28));
@@ -3665,7 +3864,7 @@ mod app {
             for idx in asks {
                 self.items[idx].asked = true;
                 if let Some(tx) = &self.tx {
-                    let _ = tx.send((self.gen, idx, self.items[idx].path.clone()));
+                    let _ = tx.send((self.gen, idx, self.items[idx].path.clone(), cw, th));
                 }
             }
         }
@@ -3831,19 +4030,24 @@ mod app {
     }
 
     /// Dibuja la miniatura llenando el rectángulo (recorta lo que sobra, sin deformar).
-    unsafe fn blit_cover(dc: HDC, bmp: HBITMAP, r: RECT) {
+    /// Dibuja la miniatura en el rectángulo. Si es del mismo tamaño (lo normal) es una copia directa, sin escalar.
+    unsafe fn blit_cover(dc: HDC, bmp: HBITMAP, (bw, bh): (i32, i32), r: RECT) {
         let src = CreateCompatibleDC(Some(dc));
         let old = SelectObject(src, bmp.into());
         let (dw, dh) = (r.right - r.left, r.bottom - r.top);
-        let (mut sw, mut sh) = (THUMB_W, THUMB_H);
-        if sw * dh > sh * dw {
-            sw = sh * dw / dh.max(1);
+        if (bw, bh) == (dw, dh) {
+            let _ = BitBlt(dc, r.left, r.top, dw, dh, Some(src), 0, 0, SRCCOPY);
         } else {
-            sh = sw * dh / dw.max(1);
+            // mientras llega la del tamaño nuevo: escalado rápido
+            let (mut sw, mut sh) = (bw, bh);
+            if sw * dh > sh * dw {
+                sw = sh * dw / dh.max(1);
+            } else {
+                sh = sw * dh / dw.max(1);
+            }
+            SetStretchBltMode(dc, COLORONCOLOR);
+            let _ = StretchBlt(dc, r.left, r.top, dw, dh, Some(src), (bw - sw) / 2, (bh - sh) / 2, sw, sh, SRCCOPY);
         }
-        SetStretchBltMode(dc, HALFTONE);
-        let _ = SetBrushOrgEx(dc, 0, 0, None);
-        let _ = StretchBlt(dc, r.left, r.top, dw, dh, Some(src), (THUMB_W - sw) / 2, (THUMB_H - sh) / 2, sw, sh, SRCCOPY);
         SelectObject(src, old);
         let _ = DeleteDC(src);
     }
@@ -3859,8 +4063,9 @@ mod app {
         }
     }
 
-    /// Miniatura del Explorador (usa su caché) centrada en THUMB_W×THUMB_H, y la duración si es un video.
-    unsafe fn make_thumb(path: &Path) -> (Option<HBITMAP>, Option<u32>) {
+    /// Miniatura del Explorador (usa su caché) ya escalada a w×h llenando la tarjeta, y la duración si es un video.
+    /// El escalado de calidad se hace una sola vez acá (en el hilo de fondo), no en cada dibujo.
+    unsafe fn make_thumb(path: &Path, w: i32, h: i32) -> (Option<HBITMAP>, Option<u32>) {
         use windows::core::Interface;
         let p = wide(&path.to_string_lossy());
         let Ok(item) = SHCreateItemFromParsingName::<_, _, IShellItem2>(PCWSTR(p.as_ptr()), None) else { return (None, None) };
@@ -3870,12 +4075,12 @@ mod app {
             .map(|d| ((d + 5_000_000) / 10_000_000) as u32)
             .filter(|&d| d > 0);
         let Ok(f) = item.cast::<IShellItemImageFactory>() else { return (None, dur) };
-        let Ok(src) = f.GetImage(SIZE { cx: THUMB_W, cy: THUMB_H }, SIIGBF_RESIZETOFIT | SIIGBF_THUMBNAILONLY) else { return (None, dur) };
+        let Ok(src) = f.GetImage(SIZE { cx: w, cy: h }, SIIGBF_RESIZETOFIT | SIIGBF_THUMBNAILONLY) else { return (None, dur) };
         let mut bm = BITMAP::default();
         GetObjectW(src.into(), std::mem::size_of::<BITMAP>() as i32, Some(&mut bm as *mut _ as _));
-        let (sw, sh) = (bm.bmWidth.min(THUMB_W), bm.bmHeight.abs().min(THUMB_H));
+        let (bw, bh) = (bm.bmWidth.max(1), bm.bmHeight.abs().max(1));
         let bmi = BITMAPINFO {
-            bmiHeader: BITMAPINFOHEADER { biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32, biWidth: THUMB_W, biHeight: -THUMB_H, biPlanes: 1, biBitCount: 32, ..Default::default() },
+            bmiHeader: BITMAPINFOHEADER { biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32, biWidth: w, biHeight: -h, biPlanes: 1, biBitCount: 32, ..Default::default() },
             ..Default::default()
         };
         let mut bits = std::ptr::null_mut();
@@ -3887,8 +4092,17 @@ mod app {
         let d2 = CreateCompatibleDC(None);
         let o1 = SelectObject(d1, dst.into());
         let o2 = SelectObject(d2, src.into());
-        fill(d1, rc(0, 0, THUMB_W, THUMB_H), THUMB_BG);
-        let _ = BitBlt(d1, (THUMB_W - sw) / 2, (THUMB_H - sh) / 2, sw, sh, Some(d2), 0, 0, SRCCOPY);
+        fill(d1, rc(0, 0, w, h), THUMB_BG);
+        // "cover": llenar la tarjeta recortando lo que sobra, sin deformar
+        let (mut sw, mut sh) = (bw, bh);
+        if sw * h > sh * w {
+            sw = sh * w / h.max(1);
+        } else {
+            sh = sw * h / w.max(1);
+        }
+        SetStretchBltMode(d1, HALFTONE);
+        let _ = SetBrushOrgEx(d1, 0, 0, None);
+        let _ = StretchBlt(d1, 0, 0, w, h, Some(d2), (bw - sw) / 2, (bh - sh) / 2, sw, sh, SRCCOPY);
         SelectObject(d1, o1);
         SelectObject(d2, o2);
         let _ = DeleteDC(d1);
@@ -3898,16 +4112,16 @@ mod app {
     }
 
     /// Hilo de miniaturas con prioridad de fondo (CPU y disco bajos). Termina cuando se cierra la ventana.
-    fn start_thumb_thread(hwnd: HWND, rx: std::sync::mpsc::Receiver<(u64, usize, PathBuf)>) {
+    fn start_thumb_thread(hwnd: HWND, rx: std::sync::mpsc::Receiver<ThumbReq>) {
         use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
         use windows::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_MODE_BACKGROUND_BEGIN};
         let hw = hwnd.0 as isize;
         std::thread::spawn(move || unsafe {
             let _ = SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN);
             let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
-            while let Ok((gen, idx, path)) = rx.recv() {
-                let (bmp, dur) = make_thumb(&path);
-                let msg = Box::new((gen, idx, bmp.map_or(0, |b| b.0 as isize), dur));
+            while let Ok((gen, idx, path, w, h)) = rx.recv() {
+                let (bmp, dur) = make_thumb(&path, w, h);
+                let msg = Box::new((gen, idx, bmp.map_or(0, |b| b.0 as isize), dur, (w, h)));
                 let raw = Box::into_raw(msg);
                 if PostMessageW(Some(HWND(hw as _)), WM_THUMB, WPARAM(0), LPARAM(raw as isize)).is_err() {
                     let m = Box::from_raw(raw);
@@ -3928,9 +4142,14 @@ mod app {
             let t = wide(t);
             let _ = AppendMenuW(menu, MF_STRING, id, PCWSTR(t.as_ptr()));
         };
-        item(m, 201, "Abrir\tEnter");
-        item(m, 202, "Compartir…");
-        item(m, 203, "Copiar (para pegar en Discord o WhatsApp)\tCtrl+C");
+        item(m, 201, if video { "Ver y editar\tEnter" } else { "Abrir\tEnter" });
+        if video {
+            item(m, 272, "Abrir en el reproductor de Windows");
+        }
+        item(m, 202, "Copiar link para compartir (se borra en 3 días)");
+        item(m, 270, "Copiar link permanente");
+        item(m, 203, "Copiar el archivo (para pegar en Discord o WhatsApp)\tCtrl+C");
+        item(m, 271, "Compartir con Windows…");
         item(m, 208, if fav { "Quitar de favoritos" } else { "Agregar a favoritos ⭐" });
         item(m, 209, "Renombrar…\tF2");
         if video {
@@ -4011,6 +4230,14 @@ mod app {
                 LRESULT(0)
             }
             WM_TIMER => {
+                if wp.0 == 2 {
+                    with_app(|a| {
+                        if let Some(g) = a.gallery.as_mut() {
+                            g.scroll_step();
+                        }
+                    });
+                    return LRESULT(0);
+                }
                 // reloj de la grabación y estado
                 with_app(|a| {
                     if a.manual.is_some() {
@@ -4187,10 +4414,10 @@ mod app {
                 LRESULT(0)
             }
             WM_THUMB => {
-                let m = Box::from_raw(lp.0 as *mut (u64, usize, isize, Option<u32>));
-                let (gen, idx, bmp, dur) = *m;
+                let m = Box::from_raw(lp.0 as *mut (u64, usize, isize, Option<u32>, (i32, i32)));
+                let (gen, idx, bmp, dur, size) = *m;
                 let bmp = HBITMAP(bmp as _);
-                if with_app(|a| a.add_thumb(gen, idx, bmp, dur)).is_none() && !bmp.is_invalid() {
+                if with_app(|a| a.add_thumb(gen, idx, bmp, dur, size)).is_none() && !bmp.is_invalid() {
                     let _ = DeleteObject(bmp.into());
                 }
                 LRESULT(0)
@@ -4202,6 +4429,564 @@ mod app {
                     a.gallery = None;
                     a.share_token = None;
                 });
+                trim_ram();
+                LRESULT(0)
+            }
+            _ => DefWindowProcW(hwnd, msg, wp, lp),
+        }
+    }
+
+    // ---------- visor / editor de un clip ----------
+    // Reproduce con Media Foundation de Windows (decodifica la placa de video, casi nada de procesador).
+    // Solo existe mientras está abierto; la barra de tiempo se redibuja sola (10 veces por segundo y solo
+    // mientras reproduce). Recortar es una copia sin recomprimir: instantáneo hasta en la peor PC.
+
+    #[derive(Clone, Copy, PartialEq, Debug)]
+    enum VHit {
+        None,
+        Track,
+        In,
+        Out,
+        Play,
+        /// 0 guardar recorte, 1 copiar link, 2 discord, 3 reproductor de Windows
+        Btn(u8),
+    }
+
+    struct Viewer {
+        hwnd: HWND,
+        video: HWND,
+        player: Option<windows::Win32::Media::MediaFoundation::IMFPMediaPlayer>,
+        path: PathBuf,
+        title: String,
+        /// duración en segundos (0 = todavía no se sabe)
+        dur: f64,
+        pos: f64,
+        playing: bool,
+        inp: f64,
+        out: f64,
+        drag: VHit,
+        hover: VHit,
+        hits: Vec<(RECT, VHit)>,
+        fonts: [HFONT; 4],
+    }
+
+    impl Viewer {
+        fn s(&self, v: i32) -> i32 {
+            let dpi = unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(self.hwnd) }.max(96) as i32;
+            v * dpi / 96
+        }
+
+        fn panel_h(&self) -> i32 {
+            self.s(132)
+        }
+
+        fn layout(&self) {
+            unsafe {
+                let mut r = RECT::default();
+                let _ = GetClientRect(self.hwnd, &mut r);
+                let top = self.s(58);
+                let _ = MoveWindow(self.video, 0, top, r.right, (r.bottom - top - self.panel_h()).max(1), true);
+                if let Some(p) = &self.player {
+                    let _ = p.UpdateVideo();
+                }
+            }
+        }
+
+        fn redraw_panel(&self) {
+            unsafe {
+                let mut r = RECT::default();
+                let _ = GetClientRect(self.hwnd, &mut r);
+                r.top = r.bottom - self.panel_h();
+                let _ = InvalidateRect(Some(self.hwnd), Some(&r), false);
+            }
+        }
+
+        /// Lee posición y duración del reproductor.
+        fn poll(&mut self) {
+            use windows::Win32::Media::MediaFoundation::MFP_POSITIONTYPE_100NS;
+            let Some(p) = &self.player else { return };
+            unsafe {
+                if self.dur <= 0.0 {
+                    if let Ok(v) = p.GetDuration(&MFP_POSITIONTYPE_100NS) {
+                        if let Ok(d) = u64::try_from(&v) {
+                            self.dur = d as f64 / 1e7;
+                            if self.out <= 0.0 {
+                                self.out = self.dur;
+                            }
+                        }
+                    }
+                }
+                if let Ok(v) = p.GetPosition(&MFP_POSITIONTYPE_100NS) {
+                    if let Ok(t) = i64::try_from(&v) {
+                        self.pos = t as f64 / 1e7;
+                    }
+                }
+            }
+            // con un recorte marcado, la reproducción da la vuelta dentro del recorte (para ver cómo queda)
+            if self.playing && self.trimmed() && self.pos >= self.out - 0.05 {
+                self.seek(self.inp);
+            }
+        }
+
+        fn trimmed(&self) -> bool {
+            self.dur > 0.0 && (self.inp > 0.05 || self.out < self.dur - 0.05)
+        }
+
+        fn seek(&mut self, t: f64) {
+            use windows::Win32::Media::MediaFoundation::MFP_POSITIONTYPE_100NS;
+            let t = t.clamp(0.0, if self.dur > 0.0 { self.dur } else { t.max(0.0) });
+            self.pos = t;
+            if let Some(p) = &self.player {
+                let v = windows::Win32::System::Com::StructuredStorage::PROPVARIANT::from((t * 1e7) as i64);
+                unsafe {
+                    let _ = p.SetPosition(&MFP_POSITIONTYPE_100NS, &v);
+                }
+            }
+            self.redraw_panel();
+        }
+
+        fn toggle_play(&mut self) {
+            let Some(p) = &self.player else { return };
+            unsafe {
+                if self.playing {
+                    let _ = p.Pause();
+                    let _ = KillTimer(Some(self.hwnd), 1);
+                } else {
+                    let _ = p.Play();
+                    SetTimer(Some(self.hwnd), 1, 100, None);
+                }
+            }
+            self.playing = !self.playing;
+            self.redraw_panel();
+        }
+
+        fn track_rect(&self) -> RECT {
+            let mut r = RECT::default();
+            unsafe {
+                let _ = GetClientRect(self.hwnd, &mut r);
+            }
+            let y = r.bottom - self.panel_h() + self.s(18);
+            rc(self.s(24), y, r.right - self.s(24), y + self.s(34))
+        }
+
+        fn time_at(&self, x: i32) -> f64 {
+            let tr = self.track_rect();
+            let f = ((x - tr.left) as f64 / (tr.right - tr.left).max(1) as f64).clamp(0.0, 1.0);
+            f * self.dur.max(0.0)
+        }
+
+        fn x_at(&self, t: f64) -> i32 {
+            let tr = self.track_rect();
+            tr.left + ((tr.right - tr.left) as f64 * if self.dur > 0.0 { (t / self.dur).clamp(0.0, 1.0) } else { 0.0 }) as i32
+        }
+
+        fn hit(&self, x: i32, y: i32) -> VHit {
+            self.hits.iter().rev().find(|(r, _)| x >= r.left && x < r.right && y >= r.top && y < r.bottom).map_or(VHit::None, |h| h.1)
+        }
+
+        /// Mover el inicio/fin del recorte o la posición (arrastrando).
+        fn drag_to(&mut self, x: i32) {
+            let t = self.time_at(x);
+            match self.drag {
+                VHit::In => {
+                    self.inp = t.min(self.out - 0.5).max(0.0);
+                    self.seek(self.inp);
+                }
+                VHit::Out => {
+                    self.out = t.max(self.inp + 0.5).min(self.dur);
+                    self.seek(self.out);
+                }
+                VHit::Track => self.seek(t),
+                _ => {}
+            }
+        }
+
+        unsafe fn paint(&mut self, dc: HDC, w: i32, h: i32) {
+            let dpi = windows::Win32::UI::HiDpi::GetDpiForWindow(self.hwnd).max(96) as i32;
+            let s = move |v: i32| v * dpi / 96;
+            let [title_f, body, bold, icon] = self.fonts;
+            self.hits.clear();
+            SetBkMode(dc, TRANSPARENT);
+            // encabezado
+            fill(dc, rc(0, 0, w, s(58)), SIDE);
+            grad_round(dc, rc(s(20), s(22), s(26), s(36)), s(3), ORANGE, PINK, true);
+            text(dc, &self.title, rc(s(36), 0, w - s(20), s(58)), title_f, TEXT, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+            if self.player.is_none() {
+                let vr = rc(0, s(58), w, h - self.panel_h());
+                fill(dc, vr, rgb(8, 8, 12));
+                text(dc, "No se puede reproducir acá. Usá \"Reproductor de Windows\".", vr, body, MUTED, DT_SINGLELINE | DT_VCENTER | DT_CENTER);
+            }
+            // panel de abajo
+            let py = h - self.panel_h();
+            fill(dc, rc(0, py, w, h), SIDE);
+            let tr = self.track_rect();
+            let mid = (tr.top + tr.bottom) / 2;
+            round(dc, rc(tr.left, mid - s(4), tr.right, mid + s(4)), s(8), rgb(52, 46, 72));
+            if self.dur > 0.0 {
+                let (xi, xo, xp) = (self.x_at(self.inp), self.x_at(self.out), self.x_at(self.pos));
+                // parte que queda en el recorte
+                grad_round(dc, rc(xi, mid - s(6), xo.max(xi + 1), mid + s(6)), s(10), rgb(255, 160, 60), PINK, false);
+                // lo que se saca, más oscuro
+                if xi > tr.left {
+                    round(dc, rc(tr.left, mid - s(4), xi, mid + s(4)), s(8), rgb(38, 34, 52));
+                }
+                if xo < tr.right {
+                    round(dc, rc(xo, mid - s(4), tr.right, mid + s(4)), s(8), rgb(38, 34, 52));
+                }
+                // manijas del recorte
+                for (x, which) in [(xi, VHit::In), (xo, VHit::Out)] {
+                    let hr = rc(x - s(7), tr.top, x + s(7), tr.bottom);
+                    let on = self.hover == which || self.drag == which;
+                    round(dc, hr, s(6), if on { TEXT } else { rgb(255, 214, 0) });
+                    self.hits.push((rc(x - s(14), tr.top - s(6), x + s(14), tr.bottom + s(6)), which));
+                }
+                // posición
+                ellipse(dc, rc(xp - s(9), mid - s(9), xp + s(9), mid + s(9)), TEXT);
+            }
+            self.hits.insert(0, (rc(tr.left - s(8), tr.top - s(6), tr.right + s(8), tr.bottom + s(6)), VHit::Track));
+            // botón play/pausa
+            let by = py + s(64);
+            let pr = rc(s(24), by, s(24) + s(52), by + s(52));
+            grad_ellipse(dc, pr, ORANGE, PINK);
+            glyph_at(dc, if self.playing { 0xE769 } else { 0xE768 }, rc(pr.left + if self.playing { 0 } else { s(2) }, pr.top, pr.right, pr.bottom), icon, TEXT);
+            self.hits.push((pr, VHit::Play));
+            let t = if self.trimmed() {
+                format!("{} / {}   ·   recorte: {}", logic::fmt_elapsed(self.pos as u64), logic::fmt_elapsed(self.dur.round() as u64), logic::fmt_elapsed((self.out - self.inp).round() as u64))
+            } else {
+                format!("{} / {}", logic::fmt_elapsed(self.pos as u64), logic::fmt_elapsed(self.dur.round() as u64))
+            };
+            text(dc, &t, rc(pr.right + s(14), by, w, by + s(52)), bold, TEXT, DT_SINGLELINE | DT_VCENTER);
+            // botones a la derecha
+            let mut x = w - s(24);
+            for (b, label, glyph) in [(3u8, "Reproductor de Windows", 0xE8A7u16), (2, "Para Discord", 0xE8BD), (1, "Copiar link", 0xE71B), (0, "Guardar recorte", 0xE8C6)] {
+                let tw = text_w(dc, bold, label) + s(56);
+                let r = rc(x - tw, by + s(4), x, by + s(48));
+                let on = self.hover == VHit::Btn(b);
+                let accent = b == 0 && self.trimmed();
+                if accent {
+                    grad_round(dc, r, s(22), if on { rgb(255, 160, 40) } else { ORANGE }, PINK, false);
+                } else {
+                    round(dc, r, s(22), if on { rgb(66, 58, 92) } else { rgb(44, 38, 62) });
+                }
+                glyph_at(dc, glyph, rc(r.left + s(12), r.top, r.left + s(40), r.bottom), icon, if accent { TEXT } else { ORANGE });
+                text(dc, label, rc(r.left + s(42), r.top, r.right, r.bottom), bold, if b == 0 && !self.trimmed() { MUTED } else { TEXT }, DT_SINGLELINE | DT_VCENTER);
+                self.hits.push((r, VHit::Btn(b)));
+                x = r.left - s(10);
+            }
+            if !self.trimmed() && self.dur > 0.0 {
+                text(dc, "Arrastrá las manijas amarillas para recortar  ·  Espacio: pausa  ·  I / O: marcar inicio y fin", rc(s(24), h - s(22), w, h - s(4)), body, MUTED, DT_SINGLELINE | DT_VCENTER);
+            }
+        }
+    }
+
+    impl Drop for Viewer {
+        fn drop(&mut self) {
+            unsafe {
+                if let Some(p) = self.player.take() {
+                    let _ = p.Shutdown();
+                }
+                let _ = windows::Win32::Media::MediaFoundation::MFShutdown();
+                for f in self.fonts {
+                    let _ = DeleteObject(f.into());
+                }
+            }
+        }
+    }
+
+    impl App {
+        fn open_viewer(&mut self, path: PathBuf, title: String, dur: Option<u32>) {
+            unsafe {
+                if let Some(v) = self.viewer.take() {
+                    let h = v.hwnd;
+                    drop(v);
+                    let _ = DestroyWindow(h);
+                }
+                let hinst: HINSTANCE = GetModuleHandleW(None).unwrap_or_default().into();
+                let dpi = windows::Win32::UI::HiDpi::GetDpiForSystem().max(96) as i32;
+                let sc = |v: i32| v * dpi / 96;
+                let t = wide(&format!("Jugadón – {title}"));
+                let Ok(hwnd) = CreateWindowExW(
+                    WINDOW_EX_STYLE(0),
+                    w!("jugadon_viewer"),
+                    PCWSTR(t.as_ptr()),
+                    WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
+                    CW_USEDEFAULT,
+                    CW_USEDEFAULT,
+                    sc(1040),
+                    sc(720),
+                    None,
+                    None,
+                    Some(hinst),
+                    None,
+                ) else {
+                    return;
+                };
+                dark_title_bar(hwnd);
+                let _ = SendMessageW(hwnd, WM_SETICON, Some(WPARAM(ICON_SMALL as usize)), Some(LPARAM(self.icon_on.0 as isize)));
+                let video = CreateWindowExW(WINDOW_EX_STYLE(0), w!("jugadon_video"), PCWSTR::null(), WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS, 0, 0, 10, 10, Some(hwnd), None, Some(hinst), None).unwrap_or_default();
+                let font = |px: i32, weight: i32, face: PCWSTR| {
+                    CreateFontW(-sc(px), 0, 0, 0, weight, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, 0, face)
+                };
+                let fonts = [font(18, 700, w!("Segoe UI")), font(13, 400, w!("Segoe UI")), font(14, 600, w!("Segoe UI")), font(18, 400, w!("Segoe MDL2 Assets"))];
+                // reproductor de Windows (Media Foundation): decodifica la placa de video
+                let _ = windows::Win32::Media::MediaFoundation::MFStartup(0x0002_0070, 1);
+                let url = wide(&path.to_string_lossy());
+                let mut player = None;
+                let created = windows::Win32::Media::MediaFoundation::MFPCreateMediaPlayer(
+                    PCWSTR(url.as_ptr()),
+                    true,
+                    windows::Win32::Media::MediaFoundation::MFP_CREATION_OPTIONS(0),
+                    None,
+                    Some(video),
+                    Some(&mut player),
+                );
+                if let Err(e) = &created {
+                    log_line(&self.log_path, &format!("visor: no se pudo reproducir ({e})"));
+                }
+                let d = dur.map_or(0.0, |d| d as f64);
+                let v = Viewer {
+                    hwnd,
+                    video,
+                    player: if created.is_ok() { player } else { None },
+                    path,
+                    title,
+                    dur: d,
+                    pos: 0.0,
+                    playing: created.is_ok(),
+                    inp: 0.0,
+                    out: d,
+                    drag: VHit::None,
+                    hover: VHit::None,
+                    hits: Vec::new(),
+                    fonts,
+                };
+                v.layout();
+                if v.playing {
+                    SetTimer(Some(hwnd), 1, 100, None);
+                }
+                self.viewer = Some(v);
+                let _ = ShowWindow(hwnd, SW_SHOW);
+                let _ = SetForegroundWindow(hwnd);
+                log_line(&self.log_path, "visor abierto");
+            }
+        }
+
+        fn viewer_btn(&mut self, b: u8) {
+            let Some(v) = self.viewer.as_ref() else { return };
+            let (path, inp, out, dur, trimmed) = (v.path.clone(), v.inp, v.out, v.dur, v.trimmed());
+            match b {
+                0 if trimmed => self.copy_of(path, 3, inp, out, Some(dur as u32)),
+                0 => self.notify("Arrastrá las manijas amarillas de la barra para elegir qué parte guardar.", false),
+                1 => self.share_link(path, false),
+                2 => self.copy_of(path, 2, 0.0, 0.0, (dur > 0.0).then_some(dur.round() as u32)),
+                _ => {
+                    if let Some(v) = self.viewer.as_mut() {
+                        if v.playing {
+                            v.toggle_play();
+                        }
+                    }
+                    let p = wide(&path.to_string_lossy());
+                    unsafe {
+                        ShellExecuteW(None, w!("open"), PCWSTR(p.as_ptr()), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL);
+                    }
+                }
+            }
+        }
+    }
+
+    unsafe extern "system" fn video_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+        match msg {
+            WM_ERASEBKGND => {
+                let mut r = RECT::default();
+                let _ = GetClientRect(hwnd, &mut r);
+                FillRect(HDC(wp.0 as _), &r, HBRUSH(GetStockObject(BLACK_BRUSH).0));
+                LRESULT(1)
+            }
+            WM_PAINT => {
+                let mut ps = PAINTSTRUCT::default();
+                let _ = BeginPaint(hwnd, &mut ps);
+                with_app(|a| {
+                    if let Some(p) = a.viewer.as_ref().and_then(|v| v.player.as_ref()) {
+                        let _ = p.UpdateVideo();
+                    }
+                });
+                let _ = EndPaint(hwnd, &ps);
+                LRESULT(0)
+            }
+            // clic en el video: pausa / sigue
+            WM_LBUTTONUP => {
+                with_app(|a| {
+                    if let Some(v) = a.viewer.as_mut() {
+                        v.toggle_play();
+                    }
+                });
+                LRESULT(0)
+            }
+            _ => DefWindowProcW(hwnd, msg, wp, lp),
+        }
+    }
+
+    unsafe extern "system" fn viewer_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+        let pt = || ((lp.0 & 0xFFFF) as i16 as i32, ((lp.0 >> 16) & 0xFFFF) as i16 as i32);
+        match msg {
+            WM_ERASEBKGND => LRESULT(1),
+            WM_PAINT => {
+                let mut ps = PAINTSTRUCT::default();
+                let dc = BeginPaint(hwnd, &mut ps);
+                let mut r = RECT::default();
+                let _ = GetClientRect(hwnd, &mut r);
+                let (w, h) = (r.right.max(1), r.bottom.max(1));
+                let mem = CreateCompatibleDC(Some(dc));
+                let bmp = CreateCompatibleBitmap(dc, w, h);
+                let old = SelectObject(mem, bmp.into());
+                if with_app(|a| a.viewer.as_mut().map(|v| v.paint(mem, w, h))).flatten().is_none() {
+                    fill(mem, rc(0, 0, w, h), SIDE);
+                }
+                // el video lo dibuja su propia ventana: solo se copian el encabezado y el panel
+                let top = 58 * windows::Win32::UI::HiDpi::GetDpiForWindow(hwnd).max(96) as i32 / 96;
+                let panel = 132 * windows::Win32::UI::HiDpi::GetDpiForWindow(hwnd).max(96) as i32 / 96;
+                let _ = BitBlt(dc, 0, 0, w, top, Some(mem), 0, 0, SRCCOPY);
+                let _ = BitBlt(dc, 0, h - panel, w, panel, Some(mem), 0, h - panel, SRCCOPY);
+                SelectObject(mem, old);
+                let _ = DeleteObject(bmp.into());
+                let _ = DeleteDC(mem);
+                let _ = EndPaint(hwnd, &ps);
+                LRESULT(0)
+            }
+            WM_SIZE => {
+                with_app(|a| {
+                    if let Some(v) = &a.viewer {
+                        v.layout();
+                    }
+                });
+                let _ = InvalidateRect(Some(hwnd), None, false);
+                LRESULT(0)
+            }
+            WM_GETMINMAXINFO => {
+                let dpi = windows::Win32::UI::HiDpi::GetDpiForWindow(hwnd).max(96) as i32;
+                let mi = &mut *(lp.0 as *mut MINMAXINFO);
+                mi.ptMinTrackSize = POINT { x: 760 * dpi / 96, y: 460 * dpi / 96 };
+                LRESULT(0)
+            }
+            WM_TIMER => {
+                with_app(|a| {
+                    if let Some(v) = a.viewer.as_mut() {
+                        v.poll();
+                        v.redraw_panel();
+                    }
+                });
+                LRESULT(0)
+            }
+            WM_MOUSEMOVE => {
+                let (x, y) = pt();
+                with_app(|a| {
+                    let Some(v) = a.viewer.as_mut() else { return };
+                    if v.drag != VHit::None {
+                        v.drag_to(x);
+                        return;
+                    }
+                    let h = v.hit(x, y);
+                    if h != v.hover {
+                        v.hover = h;
+                        v.redraw_panel();
+                    }
+                });
+                LRESULT(0)
+            }
+            WM_SETCURSOR => {
+                if (lp.0 & 0xFFFF) as u32 == HTCLIENT && with_app(|a| a.viewer.as_ref().is_some_and(|v| v.hover != VHit::None)).unwrap_or(false) {
+                    SetCursor(LoadCursorW(None, IDC_HAND).ok());
+                    return LRESULT(1);
+                }
+                DefWindowProcW(hwnd, msg, wp, lp)
+            }
+            WM_LBUTTONDOWN => {
+                let (x, y) = pt();
+                let btn = with_app(|a| {
+                    let v = a.viewer.as_mut()?;
+                    match v.hit(x, y) {
+                        VHit::Play => v.toggle_play(),
+                        h @ (VHit::Track | VHit::In | VHit::Out) => {
+                            v.drag = h;
+                            v.drag_to(x);
+                            SetCapture(hwnd);
+                        }
+                        VHit::Btn(b) => return Some(b),
+                        VHit::None => {}
+                    }
+                    None
+                })
+                .flatten();
+                if let Some(b) = btn {
+                    with_app(|a| a.viewer_btn(b));
+                }
+                LRESULT(0)
+            }
+            WM_LBUTTONUP => {
+                with_app(|a| {
+                    if let Some(v) = a.viewer.as_mut() {
+                        if v.drag != VHit::None {
+                            v.drag = VHit::None;
+                            let _ = ReleaseCapture();
+                            v.redraw_panel();
+                        }
+                    }
+                });
+                LRESULT(0)
+            }
+            WM_KEYDOWN => {
+                let vk = wp.0 as u32;
+                if vk == 0x1B {
+                    let _ = DestroyWindow(hwnd);
+                    return LRESULT(0);
+                }
+                let btn = with_app(|a| {
+                    let v = a.viewer.as_mut()?;
+                    match vk {
+                        0x20 => v.toggle_play(),
+                        0x25 => v.seek(v.pos - 5.0),
+                        0x27 => v.seek(v.pos + 5.0),
+                        0x49 if v.dur > 0.0 => {
+                            v.inp = v.pos.min(v.out - 0.5).max(0.0);
+                            v.redraw_panel();
+                        }
+                        0x4F if v.dur > 0.0 => {
+                            v.out = v.pos.max(v.inp + 0.5).min(v.dur);
+                            v.redraw_panel();
+                        }
+                        0x0D => return Some(0),
+                        0x4C => return Some(1),
+                        _ => {}
+                    }
+                    None
+                })
+                .flatten();
+                if let Some(b) = btn {
+                    with_app(|a| a.viewer_btn(b));
+                }
+                LRESULT(0)
+            }
+            WM_COMMAND => {
+                // prueba automática: marcar un recorte de 1 a 4 s y guardarlo
+                if wp.0 & 0xFFFF == 1 {
+                    with_app(|a| {
+                        if let Some(v) = a.viewer.as_mut() {
+                            if v.dur <= 0.0 {
+                                v.dur = 10.0;
+                            }
+                            v.inp = 1.0;
+                            v.out = 4.0f64.min(v.dur);
+                        }
+                        a.viewer_btn(0);
+                    });
+                }
+                LRESULT(0)
+            }
+            WM_DESTROY => {
+                // cerrar: se apaga el reproductor y se devuelve todo
+                let _ = KillTimer(Some(hwnd), 1);
+                let v = with_app(|a| a.viewer.take()).flatten();
+                drop(v);
                 trim_ram();
                 LRESULT(0)
             }
@@ -4370,6 +5155,11 @@ mod app {
                 }
                 LRESULT(0)
             }
+            WM_LINK => {
+                let (name, url, exp, permanent) = *Box::from_raw(lp.0 as *mut (String, String, u64, bool));
+                with_app(|a| a.link_done(name, url, exp, permanent));
+                LRESULT(0)
+            }
             WM_PROBED => {
                 with_app(|a| a.probe_done(wp.0));
                 LRESULT(0)
@@ -4520,6 +5310,17 @@ mod app {
                 style: CS_DBLCLKS,
                 ..Default::default()
             };
+            for (name, proc_) in [(w!("jugadon_viewer"), viewer_proc as unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT), (w!("jugadon_video"), video_proc)] {
+                let vc = WNDCLASSW {
+                    lpfnWndProc: Some(proc_),
+                    hInstance: hinst.into(),
+                    lpszClassName: name,
+                    hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
+                    hbrBackground: HBRUSH(GetStockObject(BLACK_BRUSH).0),
+                    ..Default::default()
+                };
+                RegisterClassW(&vc);
+            }
             if RegisterClassW(&gwc) == 0 {
                 log_line(&log_path, &format!("no se pudo registrar la clase de la ventana de clips: {:?}", GetLastError()));
             }
@@ -4545,9 +5346,11 @@ mod app {
                 rec_dir: temp.join("jugadon_rec"),
                 menu_windows: Vec::new(),
                 gallery: None,
+                viewer: None,
                 share_token: None,
                 tick_ms: 2000,
                 probing: false,
+                uploading: std::collections::HashSet::new(),
                 rec: Rec {
                     child: None,
                     enc,

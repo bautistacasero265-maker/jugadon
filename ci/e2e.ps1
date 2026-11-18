@@ -99,6 +99,9 @@ function Snap([IntPtr]$h, [string]$name) {
   $bmp.Save((Join-Path $shots $name), [System.Drawing.Imaging.ImageFormat]::Png)
   $g.Dispose(); $bmp.Dispose()
 }
+function Clipboard-Text {
+  powershell.exe -NoProfile -Sta -Command "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.Clipboard]::GetText()"
+}
 function Clipboard-Files {
   powershell.exe -NoProfile -Sta -Command "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.Clipboard]::GetFileDropList() -join '|'"
 }
@@ -287,6 +290,40 @@ try {
   Start-Sleep -Seconds 2
   Check ((Files '* - ace.mp4').Count -ge 1) "renombrar un clip (queda '… - ace.mp4')"
   Snap $script:gal 'galeria_renombrado.png'
+  # Visor/editor: tocar un clip lo abre; se marca un recorte de 1 a 4 s y se guarda
+  GCmd 241
+  GCmd 210
+  GCmd 201
+  $vw = [IntPtr]::Zero
+  [void](Wait-Until { $script:vw = [W]::FindWindow('jugadon_viewer', [NullString]::Value); $script:vw -ne [IntPtr]::Zero } 15)
+  Check ($script:vw -ne [IntPtr]::Zero) "tocar un clip abre el visor/editor"
+  if ($script:vw -ne [IntPtr]::Zero) {
+    Start-Sleep -Seconds 3
+    [void][W]::SetForegroundWindow($script:vw)
+    Start-Sleep -Milliseconds 500
+    Snap $script:vw 'visor.png'
+    [void][W]::PostMessage($script:vw, 0x100, [IntPtr]0x20, [IntPtr]::Zero)
+    Start-Sleep -Milliseconds 500
+    Check (Responding $script:vw) "el visor responde (pausa con Espacio)"
+    $n = (Files '*_recorte*.mp4').Count
+    [void][W]::PostMessage($script:vw, 0x111, [IntPtr]1, [IntPtr]::Zero)
+    $f = Wait-New '*_recorte*.mp4' $n 30
+    Check-Video $f 2 "visor → Guardar recorte (de 1 a 4 s)"
+    if ($f) { Check ((Probe $f).Dur -le 6) "el recorte dura lo marcado (~3 s)" }
+    Get-Content $log | Select-String 'visor' | Select-Object -Last 3 | ForEach-Object { Write-Host "         log: $($_.Line)" }
+    [void][W]::PostMessage($script:vw, 0x10, [IntPtr]::Zero, [IntPtr]::Zero)
+    Start-Sleep -Seconds 2
+    Check (-not [W]::IsWindow($script:vw)) "el visor se cierra con la X"
+    Check (Responding $script:gal) "la ventana de clips sigue respondiendo después del visor"
+  }
+  # Compartir por link (sube a internet: si el servicio no responde, solo avisa)
+  GCmd 241
+  GCmd 210
+  Set-Clipboard -Value 'x'
+  GCmd 202
+  $ok = Wait-Until { (Clipboard-Text) -match '^https://' } 120
+  $txt = Clipboard-Text
+  if ($ok) { Write-Host "  OK     compartir link: $txt" } else { Write-Host "  AVISO  compartir link no respondió (servicio externo): $txt" -ForegroundColor Yellow; Get-Content $log | Select-String 'compartir' | Select-Object -Last 2 | ForEach-Object { Write-Host "         log: $($_.Line)" } }
   GCmd 240
   # Tab recorre secciones y botones; Enter sobre "Capturas" cambia de sección
   foreach ($i in 1..4) { [void][W]::PostMessage($script:gal, 0x100, [IntPtr]0x09, [IntPtr]::Zero) }
