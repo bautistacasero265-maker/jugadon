@@ -9,7 +9,7 @@ Clips de juegos para Windows 10/11, pensado para PCs de pocos recursos. Vive en 
 - 🪟 **Grabar una sola ventana** (el juego, el navegador, Discord, la que sea). Sale solo esa ventana, aunque tengas otra cosa adelante.
 - ⚡ **Hecho en Rust, todo el video en la placa.** El procesador queda para el juego.
 - 🔊 **Sonido del juego + tu micrófono** (el mic viene activado; se apaga en Opciones).
-- 🗂️ **Ventana "Mis clips"**: clic en el ícono y ves todos tus clips. Desde ahí los abrís, los compartís (con el menú Compartir de Windows), los copiás para Discord o los borrás.
+- 🗂️ **Ventana "Mis clips"**: oscura, con **miniaturas** de cada clip. Clic en el ícono y ves todos tus clips. Desde ahí los abrís, los compartís (con el menú Compartir de Windows), los copiás para Discord o los borrás.
 - 📋 **Copiar último clip**: lo pegás con Ctrl+V en Discord o WhatsApp.
 - 🔔 Aviso al guardar: tocalo y se abre el clip.
 
@@ -52,7 +52,9 @@ Los clips y capturas van a `Videos\Jugadon`. Al guardar suena un "tin-tin" y apa
 
 ### Ventana "Mis clips" (clic izquierdo en el ícono)
 
-Lista tus clips, grabaciones y capturas, del más nuevo al más viejo. Botones:
+<p align="center"><img src="assets/captura_ventana.png" alt="Ventana Mis clips" width="85%"></p>
+
+Muestra tus clips, grabaciones y capturas con miniatura, del más nuevo al más viejo. Arriba tiene el estado (grabando o en pausa), cuántos archivos hay y cuánto ocupan. Botones:
 - **Abrir**: también con doble clic.
 - **Compartir…**: abre el menú Compartir de Windows (WhatsApp, correo, Compartir con dispositivos cercanos, etc.).
 - **Copiar**: después pegás con Ctrl+V en Discord o WhatsApp.
@@ -60,7 +62,9 @@ Lista tus clips, grabaciones y capturas, del más nuevo al más viejo. Botones:
 - **Eliminar**: va a la papelera.
 - **Abrir carpeta**.
 
-Está hecha con los controles propios de Windows: no usa un navegador por dentro, como Electron. Solo existe mientras la tenés abierta: **al cerrarla con la X se libera entera** y Jugadón sigue en la bandeja sin consumir. No lee los videos para armar la lista; solo los nombres y las fechas.
+Está hecha con los controles propios de Windows: no usa un navegador por dentro, como Electron. Solo existe mientras la tenés abierta: **al cerrarla con la X se libera entera** y Jugadón sigue en la bandeja sin consumir.
+
+Las miniaturas salen del caché del Explorador de Windows, así que en general no hace falta abrir los videos. Se cargan de a una, en segundo plano y con prioridad baja de CPU y disco, y se cortan apenas cerrás la ventana. También se abre con `jugadon.exe --clips`, útil para un acceso directo.
 
 ### Menú (clic derecho en el ícono)
 
@@ -88,6 +92,7 @@ La configuración está en `%APPDATA%\Jugadon\config.ini`. Ahí también se pued
 
 ## Por qué no baja los FPS ni consume
 
+- **En reposo casi ni se despierta.** No pregunta seguido si abriste un juego: Windows le avisa cuando cambiás de ventana. Sin juego, revisa solo cada 10 segundos.
 - **En reposo no hay nada grabando.** Sin juego abierto (o con los clips apagados), ffmpeg ni siquiera está corriendo. Solo queda `jugadon.exe` esperando, y además devuelve su RAM a Windows. Medido en el CI de GitHub (no en una PC gamer): **120 KB** de RAM privada (lo que muestra el Administrador de tareas) y 16 ms de CPU en 25 segundos.
 - **Nunca graba dos cosas a la vez.** Mientras grabás con F8, los clips en segundo plano se pausan.
 - **Todo el video se procesa en la placa de video, no en el procesador.** Captura con Desktop Duplication (`ddagrab`), escala a 720p en la GPU (`scale_d3d11`) y comprime con el chip de video dedicado de la placa: **NVENC** (NVIDIA), **AMF** (AMD) o **QSV** (Intel). Ese chip es aparte de lo que usa el juego para dibujar.

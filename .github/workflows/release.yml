@@ -140,16 +140,77 @@ jobs:
           if ($ff.Count -gt 0) { throw "En reposo no debería correr ffmpeg" }
           if ($priv -gt 4MB) { Write-Host "::warning::RAM privada en reposo por encima de 4 MB" }
 
+      - name: Abrir la ventana "Mis clips", sacarle una foto y medir su RAM
+        run: |
+          $v = "$env:USERPROFILE\Videos\Jugadon"
+          New-Item -ItemType Directory -Force $v | Out-Null
+          $ff = "ffmpeg\bin\ffmpeg.exe"
+          # clips de muestra con imágenes de prueba (para que la foto tenga algo)
+          $src = 'mandelbrot=s=1280x720', 'testsrc2=s=1280x720', 'smptehdbars=s=1280x720', 'life=s=1280x720:mold=10:r=30:ratio=0.1:death_color=#C83232:life_color=#FF9A00', 'cellauto=s=1280x720:rule=110', 'rgbtestsrc=s=1280x720'
+          $i = 0
+          foreach ($s in $src) {
+            & $ff -hide_banner -loglevel error -f lavfi -i $s -t 2 -c:v libx264 -preset ultrafast -pix_fmt yuv420p -y "$v\clip_2026-11-1$i`_2$i-1$i-0$i.mp4"
+            $i++
+          }
+          & $ff -hide_banner -loglevel error -f lavfi -i 'mandelbrot=s=1280x720:start_scale=0.5' -frames:v 1 -y "$v\shot_2026-11-18_22-05-00.png"
+          Add-Type @"
+          using System; using System.Runtime.InteropServices;
+          public static class W {
+            [DllImport("user32.dll")] public static extern IntPtr FindWindow(string c, string t);
+            [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+            [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
+            [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+            public struct RECT { public int L, T, R, B; }
+          }
+          "@
+          $p = Start-Process -FilePath Jugadon\jugadon.exe -ArgumentList "--clips" -WorkingDirectory Jugadon -PassThru
+          Start-Sleep -Seconds 15
+          $h = [W]::FindWindow("jugadon_gallery", $null)
+          if ($h -eq [IntPtr]::Zero) { throw "No se abrió la ventana Mis clips" }
+          [W]::SetForegroundWindow($h) | Out-Null
+          Start-Sleep -Seconds 2
+          $r = New-Object W+RECT
+          [W]::GetWindowRect($h, [ref]$r) | Out-Null
+          Add-Type -AssemblyName System.Drawing
+          $wd = $r.R - $r.L; $ht = $r.B - $r.T
+          $bmp = New-Object System.Drawing.Bitmap $wd, $ht
+          $g = [System.Drawing.Graphics]::FromImage($bmp)
+          $g.CopyFromScreen($r.L, $r.T, 0, 0, $bmp.Size)
+          $bmp.Save("ventana.png", [System.Drawing.Imaging.ImageFormat]::Png)
+          Write-Host "Ventana: $wd x $ht"
+          $c = "\Process(jugadon)\Working Set - Private"
+          $open = (Get-Counter $c).CounterSamples[0].CookedValue
+          [W]::PostMessage($h, 0x10, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null   # WM_CLOSE = tocar la X
+          Start-Sleep -Seconds 4
+          $closed = (Get-Counter $c).CounterSamples[0].CookedValue
+          $alive = -not $p.HasExited
+          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+          Write-Host ("RAM privada con la ventana abierta: {0:N0} KB" -f ($open / 1KB))
+          Write-Host ("RAM privada después de cerrarla con la X: {0:N0} KB" -f ($closed / 1KB))
+          if (-not $alive) { throw "Jugadón se cerró al cerrar la ventana (tenía que quedar en la bandeja)" }
+
+      - name: Guardar la foto de la ventana en el repo (solo al ejecutar a mano)
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          Copy-Item ventana.png assets\captura_ventana.png -Force
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add assets/captura_ventana.png
+          git diff --cached --quiet
+          if ($LASTEXITCODE -ne 0) { git commit -m "Foto de la ventana Mis clips (generada en CI)"; git push }
+
       - uses: actions/upload-artifact@v4
         with:
           name: Jugadon-windows-x64
-          path: Jugadon-windows-x64.zip
+          path: |
+            Jugadon-windows-x64.zip
+            ventana.png
 
       - name: Publicar release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.9.${{ github.run_number }}
-          name: Jugadón v0.9.${{ github.run_number }}
+          tag_name: v1.0.${{ github.run_number }}
+          name: Jugadón v1.0.${{ github.run_number }}
           target_commitish: ${{ github.sha }}
           prerelease: ${{ github.ref_name != github.event.repository.default_branch }}
           files: Jugadon-windows-x64.zip

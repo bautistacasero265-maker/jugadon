@@ -1030,6 +1030,8 @@ mod app {
     const IDLE: u32 = 0x0000_0040;
     const TIMER_WATCHDOG: usize = 1;
     const TIMER_BIND: usize = 2;
+    /// chequeo 1,5 s después de cambiar de ventana (el juego suele pasar a pantalla completa un toque después)
+    const TIMER_FG: usize = 3;
     const RUN_KEY: PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
     const QUICK_DEATH: Duration = Duration::from_secs(5);
     /// Cuánto sigue grabando después de salir del juego (alt-tab corto no pierde el buffer).
@@ -1071,10 +1073,14 @@ mod app {
     struct Gallery {
         hwnd: HWND,
         list: HWND,
-        status: HWND,
         buttons: Vec<HWND>,
         font: HFONT,
+        big_font: HFONT,
+        il: HIMAGELIST,
         files: Vec<PathBuf>,
+        /// texto del encabezado (estado, cantidad de clips…)
+        header: String,
+        sub: String,
     }
 
     struct App {
@@ -1094,6 +1100,8 @@ mod app {
         /// ventana "Mis clips": solo existe mientras está abierta (cerrarla libera todo)
         gallery: Option<Gallery>,
         share_token: Option<i64>,
+        /// intervalo actual del watchdog: 2 s grabando, 10 s en reposo
+        tick_ms: u32,
         rec: Rec,
         binding: u8,
         hook: Option<HHOOK>,
@@ -1599,8 +1607,20 @@ mod app {
             }
         }
 
-        /// Watchdog: cada 2 s.
+        /// Watchdog + cambio de intervalo: 2 s mientras graba, 10 s en reposo (casi no despierta a la CPU).
         fn tick(&mut self) {
+            self.tick_inner();
+            let busy = self.rec.child.is_some() || self.manual.is_some() || (self.cfg.bg != BG_GAMES && self.want_rec() && !self.rec.gave_up);
+            let ms = if busy { 2000 } else { 10_000 };
+            if ms != self.tick_ms {
+                self.tick_ms = ms;
+                unsafe {
+                    SetTimer(Some(self.hwnd), TIMER_WATCHDOG, ms, None);
+                }
+            }
+        }
+
+        fn tick_inner(&mut self) {
             let now = Instant::now();
             if let Some(m) = self.manual.as_mut() {
                 if let Some(c) = m.child.as_mut() {
@@ -2070,22 +2090,6 @@ mod app {
         unsafe { SendMessageW(h, msg, Some(WPARAM(wp)), Some(LPARAM(lp))).0 }
     }
 
-    /// Ícono chico del sistema para el tipo de archivo (el mismo que usa el Explorador; no lee el archivo).
-    fn sys_icon(ext: &str) -> (i32, isize) {
-        unsafe {
-            let name = wide(&format!("x.{ext}"));
-            let mut fi = SHFILEINFOW::default();
-            let il = SHGetFileInfoW(
-                PCWSTR(name.as_ptr()),
-                windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES(0x80),
-                Some(&mut fi),
-                std::mem::size_of::<SHFILEINFOW>() as u32,
-                SHGFI_SYSICONINDEX | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES,
-            );
-            (fi.iIcon, il as isize)
-        }
-    }
-
     /// Abre la ventana de compartir de Windows con el archivo.
     fn share_file(hwnd: HWND, path: String, token: &mut Option<i64>) -> windows::core::Result<()> {
         use windows::ApplicationModel::DataTransfer::{DataRequestedEventArgs, DataTransferManager};
@@ -2128,11 +2132,11 @@ mod app {
                     WINDOW_EX_STYLE(0),
                     w!("jugadon_gallery"),
                     w!("Jugadón – Mis clips"),
-                    WS_OVERLAPPEDWINDOW,
+                    WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
                     CW_USEDEFAULT,
                     CW_USEDEFAULT,
-                    sc(820),
-                    sc(520),
+                    sc(900),
+                    sc(620),
                     None,
                     None,
                     Some(hinst),
@@ -2140,13 +2144,19 @@ mod app {
                 ) else {
                     return;
                 };
+                dark_title_bar(hwnd);
                 let _ = SendMessageW(hwnd, WM_SETICON, Some(WPARAM(ICON_SMALL as usize)), Some(LPARAM(self.icon_on.0 as isize)));
                 let big = load_icon_size(hinst, 1, GetSystemMetrics(SM_CXICON));
                 let _ = SendMessageW(hwnd, WM_SETICON, Some(WPARAM(ICON_BIG as usize)), Some(LPARAM(big.0 as isize)));
-                // fuente de los mensajes de Windows (se ve como el resto del sistema)
+                // fuentes del sistema (Segoe UI): normal y grande en negrita para el título
                 let mut ncm = NONCLIENTMETRICSW { cbSize: std::mem::size_of::<NONCLIENTMETRICSW>() as u32, ..Default::default() };
                 let _ = SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, ncm.cbSize, Some(&mut ncm as *mut _ as _), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0));
-                let font = CreateFontIndirectW(&ncm.lfMessageFont);
+                let mut lf = ncm.lfMessageFont;
+                lf.lfHeight = -sc(15);
+                let font = CreateFontIndirectW(&lf);
+                lf.lfHeight = -sc(30);
+                lf.lfWeight = 800;
+                let big_font = CreateFontIndirectW(&lf);
                 let child = |class: PCWSTR, text: &str, style: u32, id: usize| -> HWND {
                     let t = wide(text);
                     let h = CreateWindowExW(
@@ -2167,21 +2177,20 @@ mod app {
                     let _ = SendMessageW(h, WM_SETFONT, Some(WPARAM(font.0 as usize)), Some(LPARAM(1)));
                     h
                 };
-                let status = child(w!("STATIC"), "", 0, 0);
-                let buttons = GALLERY_BUTTONS.iter().map(|(id, t)| child(w!("BUTTON"), t, 0, *id)).collect();
-                let list = child(
-                    w!("SysListView32"),
-                    "",
-                    (LVS_REPORT | LVS_SHOWSELALWAYS | LVS_SINGLESEL | LVS_SHAREIMAGELISTS) as u32 | WS_BORDER.0 | WS_TABSTOP.0,
-                    300,
-                );
-                send(list, LVM_SETEXTENDEDLISTVIEWSTYLE, 0, (LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER) as isize);
-                for (i, (name, width)) in [("Nombre", 330), ("Tipo", 100), ("Fecha", 140), ("Tamaño", 90)].iter().enumerate() {
-                    let t = wide(name);
-                    let col = LVCOLUMNW { mask: LVCF_TEXT | LVCF_WIDTH, cx: sc(*width), pszText: PWSTR(t.as_ptr() as _), ..Default::default() };
-                    send(list, LVM_INSERTCOLUMNW, i, &col as *const _ as isize);
-                }
-                self.gallery = Some(Gallery { hwnd, list, status, buttons, font, files: Vec::new() });
+                // botones dibujados por nosotros (naranja / oscuro)
+                let buttons = GALLERY_BUTTONS.iter().map(|(id, t)| child(w!("BUTTON"), t, BS_OWNERDRAW as u32, *id)).collect();
+                let list = child(w!("SysListView32"), "", LVS_ICON | LVS_SHOWSELALWAYS | LVS_SINGLESEL | LVS_AUTOARRANGE | WS_TABSTOP.0, 300);
+                let _ = SetWindowTheme(list, w!("DarkMode_Explorer"), PCWSTR::null());
+                send(list, LVM_SETEXTENDEDLISTVIEWSTYLE, 0, LVS_EX_DOUBLEBUFFER as isize);
+                send(list, LVM_SETBKCOLOR, 0, BG_COLOR as isize);
+                send(list, LVM_SETTEXTBKCOLOR, 0, BG_COLOR as isize);
+                send(list, LVM_SETTEXTCOLOR, 0, 0x00F0_EBEB);
+                let (tw, th) = thumb_size(dpi);
+                let il = ImageList_Create(tw, th, ILC_COLOR32, 32, 32);
+                add_placeholders(il, tw, th, self.icon_on);
+                send(list, LVM_SETIMAGELIST, LVSIL_NORMAL as usize, il.0 as isize);
+                send(list, LVM_SETICONSPACING, 0, ((tw + sc(28)) as isize) | (((th + sc(52)) as isize) << 16));
+                self.gallery = Some(Gallery { hwnd, list, buttons, font, big_font, il, files: Vec::new(), header: String::new(), sub: String::new() });
                 self.layout_gallery();
                 self.fill_gallery();
                 let _ = ShowWindow(hwnd, SW_SHOW);
@@ -2196,31 +2205,32 @@ mod app {
                 let _ = GetClientRect(g.hwnd, &mut r);
                 let dpi = windows::Win32::UI::HiDpi::GetDpiForWindow(g.hwnd).max(96) as i32;
                 let sc = |v: i32| v * dpi / 96;
-                let (m, bh) = (sc(10), sc(30));
-                let _ = MoveWindow(g.status, m, m, r.right - 2 * m, sc(20), true);
+                let (m, bh) = (sc(12), sc(34));
+                let top = header_height(dpi) + m;
                 let mut x = m;
                 for b in &g.buttons {
                     let mut t = [0u16; 64];
                     let n = GetWindowTextW(*b, &mut t).max(0);
-                    let bw = sc(24) + n * sc(7);
-                    let _ = MoveWindow(*b, x, m + sc(26), bw, bh, true);
-                    x += bw + sc(6);
+                    let bw = sc(28) + n * sc(7);
+                    let _ = MoveWindow(*b, x, top, bw, bh, true);
+                    x += bw + sc(8);
                 }
-                let top = m + sc(26) + bh + m;
-                let _ = MoveWindow(g.list, m, top, r.right - 2 * m, (r.bottom - top - m).max(0), true);
+                let ltop = top + bh + m;
+                let _ = MoveWindow(g.list, m, ltop, r.right - 2 * m, (r.bottom - ltop - m).max(0), true);
             }
         }
 
-        /// Lee la carpeta de clips (solo nombres y fechas; no abre los videos).
+        /// Lee la carpeta de clips (solo nombres y fechas) y pide las miniaturas en segundo plano.
         fn fill_gallery(&mut self) {
             let folder = self.cfg.folder.clone();
-            let status = format!(
-                "{}     ·     {} guardar clip   ·   {} grabar/frenar   ·   {} captura",
-                self.status(),
+            let status = self.status();
+            let keys = format!(
+                "{} guardar clip   ·   {} grabar / frenar   ·   {} captura",
                 hk(self.cfg.clip),
                 hk(self.cfg.rec),
                 hk(self.cfg.shot)
             );
+            let icon = self.icon_on;
             let Some(g) = self.gallery.as_mut() else { return };
             let mut files: Vec<(std::time::SystemTime, PathBuf, u64)> = fs::read_dir(&folder)
                 .map(|rd| {
@@ -2233,35 +2243,52 @@ mod app {
                         .collect()
                 })
                 .unwrap_or_default();
-            files.sort_by(|a, b| b.0.cmp(&a.0));
+            files.sort_by_key(|f| std::cmp::Reverse(f.0));
             files.truncate(2000);
+            let total: u64 = files.iter().map(|f| f.2).sum();
+            g.header = if files.is_empty() {
+                format!("{status}   ·   Todavía no hay clips: abrí un juego y apretá {}", hk(self.cfg.clip))
+            } else {
+                format!("{status}   ·   {} archivos · {}", files.len(), logic::fmt_size(total))
+            };
+            g.sub = keys;
             unsafe {
-                let t = wide(&status);
-                let _ = SetWindowTextW(g.status, PCWSTR(t.as_ptr()));
+                let dpi = windows::Win32::UI::HiDpi::GetDpiForWindow(g.hwnd).max(96) as i32;
+                let (tw, th) = thumb_size(dpi);
                 send(g.list, LVM_DELETEALLITEMS, 0, 0);
-                let (_, il) = sys_icon("mp4");
-                send(g.list, LVM_SETIMAGELIST, LVSIL_SMALL as usize, il);
-                let (vid_icon, _) = sys_icon("mp4");
-                let (img_icon, _) = sys_icon("png");
+                let _ = ImageList_Remove(g.il, -1);
+                add_placeholders(g.il, tw, th, icon);
                 for (i, (_, path, len)) in files.iter().enumerate() {
                     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                     let (kind, date) = logic::describe_file(&name);
-                    let icon = if name.ends_with(".png") { img_icon } else { vid_icon };
-                    let tn = wide(&name);
-                    let item = LVITEMW { mask: LVIF_TEXT | LVIF_IMAGE, iItem: i as i32, pszText: PWSTR(tn.as_ptr() as _), iImage: icon, ..Default::default() };
+                    let label = if date.is_empty() { format!("{name}\n{}", logic::fmt_size(*len)) } else { format!("{kind} · {date}\n{}", logic::fmt_size(*len)) };
+                    let tn = wide(&label);
+                    let item = LVITEMW { mask: LVIF_TEXT | LVIF_IMAGE, iItem: i as i32, pszText: PWSTR(tn.as_ptr() as _), iImage: 0, ..Default::default() };
                     send(g.list, LVM_INSERTITEMW, 0, &item as *const _ as isize);
-                    for (sub, text) in [(1, kind.to_string()), (2, date), (3, logic::fmt_size(*len))] {
-                        let tt = wide(&text);
-                        let it = LVITEMW { iSubItem: sub, pszText: PWSTR(tt.as_ptr() as _), ..Default::default() };
-                        send(g.list, LVM_SETITEMTEXTW, i, &it as *const _ as isize);
-                    }
                 }
-                if files.is_empty() {
-                    let t = wide("Todavía no hay clips. Abrí un juego y apretá F9 (o F8 para grabar).");
-                    let _ = SetWindowTextW(g.status, PCWSTR(t.as_ptr()));
-                }
+                let mut hr = RECT::default();
+                let _ = GetClientRect(g.hwnd, &mut hr);
+                hr.bottom = header_height(dpi);
+                let _ = InvalidateRect(Some(g.hwnd), Some(&hr), false);
+                start_thumbnails(g.hwnd, files.iter().map(|f| f.1.clone()).collect(), tw, th);
             }
             g.files = files.into_iter().map(|f| f.1).collect();
+        }
+
+        /// Llega una miniatura del hilo de fondo.
+        fn add_thumb(&mut self, idx: usize, gen: u64, hbm: HBITMAP) {
+            unsafe {
+                if let Some(g) = &self.gallery {
+                    if gen == THUMB_GEN.load(Ordering::Relaxed) {
+                        let img = ImageList_Add(g.il, hbm, None);
+                        if img >= 0 {
+                            let item = LVITEMW { mask: LVIF_IMAGE, iItem: idx as i32, iImage: img, ..Default::default() };
+                            send(g.list, LVM_SETITEMW, 0, &item as *const _ as isize);
+                        }
+                    }
+                }
+                let _ = DeleteObject(hbm.into());
+            }
         }
 
         fn selected_file(&self) -> Option<PathBuf> {
@@ -2327,15 +2354,203 @@ mod app {
         }
     }
 
+    // ---- aspecto de la ventana (colores, encabezado, botones, miniaturas) ----
+
+    const BG_COLOR: u32 = 0x001E_1618; // RGB(24, 22, 30) en formato COLORREF (0x00BBGGRR)
+    const WM_THUMB: u32 = WM_APP + 10;
+    static THUMB_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    fn header_height(dpi: i32) -> i32 {
+        84 * dpi / 96
+    }
+
+    fn thumb_size(dpi: i32) -> (i32, i32) {
+        (192 * dpi / 96, 108 * dpi / 96)
+    }
+
+    /// Barra de título oscura (Windows 10 2004+ / 11) y del color del fondo en Windows 11.
+    fn dark_title_bar(hwnd: HWND) {
+        use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWINDOWATTRIBUTE};
+        unsafe {
+            let on: u32 = 1;
+            let _ = DwmSetWindowAttribute(hwnd, DWMWINDOWATTRIBUTE(20), &on as *const u32 as _, 4);
+            let caption: u32 = BG_COLOR;
+            let _ = DwmSetWindowAttribute(hwnd, DWMWINDOWATTRIBUTE(35), &caption as *const u32 as _, 4);
+        }
+    }
+
+    /// Bitmap 32 bits de w×h relleno de color de fondo. Devuelve (bitmap, puntero a los píxeles).
+    unsafe fn dark_dib(w: i32, h: i32) -> Option<(HBITMAP, *mut u32)> {
+        let bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER { biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32, biWidth: w, biHeight: -h, biPlanes: 1, biBitCount: 32, ..Default::default() },
+            ..Default::default()
+        };
+        let mut bits = std::ptr::null_mut();
+        let bmp = CreateDIBSection(None, &bmi, DIB_RGB_COLORS, &mut bits, None, 0).ok()?;
+        let px = bits as *mut u32;
+        for i in 0..(w * h) as usize {
+            *px.add(i) = 0xFF2A_2633;
+        }
+        Some((bmp, px))
+    }
+
+    /// Las ImageList de 32 bits usan el canal alfa: dejamos todo opaco.
+    unsafe fn opaque(px: *mut u32, n: usize) {
+        let _ = GdiFlush();
+        for i in 0..n {
+            *px.add(i) |= 0xFF00_0000;
+        }
+    }
+
+    /// Imagen 0 de la lista: el logo sobre fondo oscuro (mientras carga la miniatura).
+    unsafe fn add_placeholders(il: HIMAGELIST, w: i32, h: i32, icon: HICON) {
+        if let Some((bmp, px)) = dark_dib(w, h) {
+            let dc = CreateCompatibleDC(None);
+            let old = SelectObject(dc, bmp.into());
+            let s = h / 2;
+            let _ = DrawIconEx(dc, (w - s) / 2, (h - s) / 2, icon, s, s, 0, None, DI_NORMAL);
+            SelectObject(dc, old);
+            let _ = DeleteDC(dc);
+            opaque(px, (w * h) as usize);
+            ImageList_Add(il, bmp, None);
+            let _ = DeleteObject(bmp.into());
+        }
+    }
+
+    /// Miniatura del Explorador (usa su caché; no decodifica el video si ya la tiene), centrada en w×h.
+    unsafe fn make_thumb(path: &Path, w: i32, h: i32) -> Option<HBITMAP> {
+        let p = wide(&path.to_string_lossy());
+        let f: IShellItemImageFactory = SHCreateItemFromParsingName(PCWSTR(p.as_ptr()), None).ok()?;
+        let src = f.GetImage(SIZE { cx: w, cy: h }, SIIGBF_RESIZETOFIT | SIIGBF_THUMBNAILONLY).ok()?;
+        let mut bm = BITMAP::default();
+        GetObjectW(src.into(), std::mem::size_of::<BITMAP>() as i32, Some(&mut bm as *mut _ as _));
+        let (sw, sh) = (bm.bmWidth.min(w), bm.bmHeight.abs().min(h));
+        let (dst, px) = dark_dib(w, h)?;
+        let d1 = CreateCompatibleDC(None);
+        let d2 = CreateCompatibleDC(None);
+        let o1 = SelectObject(d1, dst.into());
+        let o2 = SelectObject(d2, src.into());
+        let _ = BitBlt(d1, (w - sw) / 2, (h - sh) / 2, sw, sh, Some(d2), 0, 0, SRCCOPY);
+        SelectObject(d1, o1);
+        SelectObject(d2, o2);
+        let _ = DeleteDC(d1);
+        let _ = DeleteDC(d2);
+        let _ = DeleteObject(src.into());
+        opaque(px, (w * h) as usize);
+        Some(dst)
+    }
+
+    /// Carga miniaturas en un hilo con prioridad de fondo (CPU y disco bajos). Se corta si la lista cambia o se cierra.
+    fn start_thumbnails(hwnd: HWND, files: Vec<PathBuf>, w: i32, h: i32) {
+        use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
+        use windows::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_MODE_BACKGROUND_BEGIN};
+        let gen = THUMB_GEN.fetch_add(1, Ordering::Relaxed) + 1;
+        let hw = hwnd.0 as isize;
+        std::thread::spawn(move || unsafe {
+            let _ = SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN);
+            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            for (i, p) in files.iter().enumerate().take(400) {
+                if THUMB_GEN.load(Ordering::Relaxed) != gen {
+                    break;
+                }
+                if let Some(bmp) = make_thumb(p, w, h) {
+                    let wp = (i & 0xFFFF) | ((gen as usize & 0xFFFF) << 16);
+                    if PostMessageW(Some(HWND(hw as _)), WM_THUMB, WPARAM(wp), LPARAM(bmp.0 as isize)).is_err() {
+                        let _ = DeleteObject(bmp.into());
+                        break;
+                    }
+                }
+            }
+            CoUninitialize();
+        });
+    }
+
+    /// Encabezado: degradé rosa → naranja, logo, título y estado.
+    unsafe fn paint_header(hwnd: HWND, dc: HDC) {
+        let Some((header, sub, big_font, font)) = with_app(|a| a.gallery.as_ref().map(|g| (g.header.clone(), g.sub.clone(), g.big_font, g.font))).flatten() else {
+            return;
+        };
+        let dpi = windows::Win32::UI::HiDpi::GetDpiForWindow(hwnd).max(96) as i32;
+        let sc = |v: i32| v * dpi / 96;
+        let mut r = RECT::default();
+        let _ = GetClientRect(hwnd, &mut r);
+        let hh = header_height(dpi);
+        let v = [
+            TRIVERTEX { x: 0, y: 0, Red: 0xFF00, Green: 0x2E00, Blue: 0x6300, Alpha: 0 },
+            TRIVERTEX { x: r.right, y: hh, Red: 0xFF00, Green: 0x9A00, Blue: 0x0000, Alpha: 0 },
+        ];
+        let gr = GRADIENT_RECT { UpperLeft: 0, LowerRight: 1 };
+        let _ = GradientFill(dc, &v, &gr as *const _ as _, 1, GRADIENT_FILL_RECT_H);
+        let icon = with_app(|a| a.icon_on).unwrap_or_default();
+        let isz = sc(52);
+        let _ = DrawIconEx(dc, sc(16), (hh - isz) / 2, icon, isz, isz, 0, None, DI_NORMAL);
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, COLORREF(0x00FF_FFFF));
+        let old = SelectObject(dc, big_font.into());
+        let t = wide("Jugadón");
+        let _ = TextOutW(dc, sc(80), sc(10), &t[..t.len() - 1]);
+        SelectObject(dc, font.into());
+        let t: Vec<u16> = header.encode_utf16().collect();
+        let _ = TextOutW(dc, sc(82), sc(46), &t);
+        let t: Vec<u16> = sub.encode_utf16().collect();
+        SetTextColor(dc, COLORREF(0x00F5_E8FF));
+        let _ = TextOutW(dc, sc(82), sc(64), &t);
+        SelectObject(dc, old);
+    }
+
+    /// Botones redondeados: los dos primeros naranjas, el resto oscuros.
+    unsafe fn draw_button(di: &DRAWITEMSTRUCT) {
+        let pressed = di.itemState.0 & ODS_SELECTED.0 != 0;
+        let accent = di.CtlID == 201 || di.CtlID == 202;
+        let color: u32 = match (accent, pressed) {
+            (true, false) => 0x0028_6AFF,
+            (true, true) => 0x0018_4ACC,
+            (false, false) => 0x0042_3A3E,
+            (false, true) => 0x002E_282B,
+        };
+        let r = di.rcItem;
+        let bg = CreateSolidBrush(COLORREF(BG_COLOR));
+        FillRect(di.hDC, &r, bg);
+        let _ = DeleteObject(bg.into());
+        let br = CreateSolidBrush(COLORREF(color));
+        let pen = CreatePen(PS_SOLID, 1, COLORREF(color));
+        let ob = SelectObject(di.hDC, br.into());
+        let op = SelectObject(di.hDC, pen.into());
+        let rad = (r.bottom - r.top) / 2;
+        let _ = RoundRect(di.hDC, r.left, r.top, r.right, r.bottom, rad, rad);
+        SelectObject(di.hDC, ob);
+        SelectObject(di.hDC, op);
+        let _ = DeleteObject(br.into());
+        let _ = DeleteObject(pen.into());
+        let mut t = [0u16; 64];
+        let n = GetWindowTextW(di.hwndItem, &mut t).max(0) as usize;
+        SetBkMode(di.hDC, TRANSPARENT);
+        SetTextColor(di.hDC, COLORREF(0x00FF_FFFF));
+        let mut rr = r;
+        DrawTextW(di.hDC, &mut t[..n], &mut rr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+
     unsafe extern "system" fn gallery_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
         match msg {
+            WM_PAINT => {
+                let mut ps = PAINTSTRUCT::default();
+                let dc = BeginPaint(hwnd, &mut ps);
+                paint_header(hwnd, dc);
+                let _ = EndPaint(hwnd, &ps);
+                LRESULT(0)
+            }
+            WM_DRAWITEM => {
+                draw_button(&*(lp.0 as *const DRAWITEMSTRUCT));
+                LRESULT(1)
+            }
             WM_SIZE => {
                 with_app(|a| a.layout_gallery());
+                let _ = InvalidateRect(Some(hwnd), None, true);
                 LRESULT(0)
             }
             WM_GETMINMAXINFO => {
                 let mi = &mut *(lp.0 as *mut MINMAXINFO);
-                mi.ptMinTrackSize = POINT { x: 640, y: 320 };
+                mi.ptMinTrackSize = POINT { x: 760, y: 420 };
                 LRESULT(0)
             }
             WM_COMMAND => {
@@ -2350,11 +2565,22 @@ mod app {
                 }
                 DefWindowProcW(hwnd, msg, wp, lp)
             }
+            WM_THUMB => {
+                let bmp = HBITMAP(lp.0 as _);
+                let (idx, gen) = (wp.0 & 0xFFFF, ((wp.0 >> 16) & 0xFFFF) as u64);
+                let cur = THUMB_GEN.load(Ordering::Relaxed) & 0xFFFF;
+                if with_app(|a| a.add_thumb(idx, if gen == cur { THUMB_GEN.load(Ordering::Relaxed) } else { u64::MAX }, bmp)).is_none() {
+                    let _ = DeleteObject(bmp.into());
+                }
+                LRESULT(0)
+            }
             WM_DESTROY => {
-                // cerrar con la X: se libera la ventana entera y Jugadón sigue en la bandeja
+                // cerrar con la X: se libera la ventana entera (miniaturas incluidas) y Jugadón sigue en la bandeja
+                THUMB_GEN.fetch_add(1, Ordering::Relaxed);
                 with_app(|a| {
                     if let Some(g) = a.gallery.take() {
                         let _ = DeleteObject(g.font.into());
+                        let _ = DeleteObject(g.big_font.into());
                     }
                     a.share_token = None;
                 });
@@ -2437,6 +2663,20 @@ mod app {
         CallNextHookEx(None, code, wp, lp)
     }
 
+    /// Windows avisa cuando cambia la ventana activa: así no hace falta preguntar seguido si hay un juego.
+    unsafe extern "system" fn foreground_changed(
+        _: windows::Win32::UI::Accessibility::HWINEVENTHOOK,
+        _: u32,
+        _: HWND,
+        _: i32,
+        _: i32,
+        _: u32,
+        _: u32,
+    ) {
+        let hwnd = HWND(MAIN_HWND.load(Ordering::Relaxed) as _);
+        SetTimer(Some(hwnd), TIMER_FG, 1500, None);
+    }
+
     fn show_menu(hwnd: HWND) {
         let Some(menu) = with_app(|a| a.build_menu()) else { return };
         let quit = unsafe {
@@ -2481,6 +2721,9 @@ mod app {
             }
             WM_TIMER => {
                 if wp.0 == TIMER_WATCHDOG {
+                    with_app(|a| a.tick());
+                } else if wp.0 == TIMER_FG {
+                    let _ = KillTimer(Some(hwnd), TIMER_FG);
                     with_app(|a| a.tick());
                 } else if wp.0 == TIMER_BIND {
                     with_app(|a| a.finish_bind(0, 0));
@@ -2628,7 +2871,7 @@ mod app {
                 hInstance: hinst.into(),
                 lpszClassName: w!("jugadon_gallery"),
                 hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
-                hbrBackground: HBRUSH((COLOR_WINDOW.0 + 1) as usize as _),
+                hbrBackground: CreateSolidBrush(COLORREF(BG_COLOR)),
                 ..Default::default()
             };
             RegisterClassW(&gwc);
@@ -2654,6 +2897,7 @@ mod app {
                 menu_windows: Vec::new(),
                 gallery: None,
                 share_token: None,
+                tick_ms: 2000,
                 rec: Rec {
                     child: None,
                     enc,
@@ -2678,8 +2922,21 @@ mod app {
                 a.register_keys();
                 a.recover_recordings();
                 a.tick(); // arranca a grabar ya si no está en "solo juegos" o si ya hay un juego abierto
+                // "jugadon.exe --clips" abre directo la ventana (sirve para un acceso directo)
+                if std::env::args().any(|x| x == "--clips") {
+                    a.open_gallery();
+                }
             });
             SetTimer(Some(hwnd), TIMER_WATCHDOG, 2000, None);
+            let _ = windows::Win32::UI::Accessibility::SetWinEventHook(
+                EVENT_SYSTEM_FOREGROUND,
+                EVENT_SYSTEM_FOREGROUND,
+                None,
+                Some(foreground_changed),
+                0,
+                0,
+                WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
+            );
 
             let mut msg = MSG::default();
             while GetMessageW(&mut msg, None, 0, 0).as_bool() {
