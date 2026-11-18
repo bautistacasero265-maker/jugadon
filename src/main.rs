@@ -11,6 +11,10 @@ mod logic {
     pub const MOD_SHIFT: u32 = 4;
     pub const VK_F9: u32 = 0x78;
     pub const VK_F10: u32 = 0x79;
+    pub const VK_F8: u32 = 0x77;
+    pub const BG_OFF: u32 = 0;
+    pub const BG_GAMES: u32 = 1;
+    pub const BG_ALWAYS: u32 = 2;
 
     #[derive(Clone, Copy, Debug, PartialEq)]
     pub struct Hotkey {
@@ -26,8 +30,10 @@ mod logic {
         pub shot: Hotkey,
         pub folder: String,
         pub encoder: usize,
-        /// grabar solo mientras hay un juego (ventana a pantalla completa): en el escritorio no consume nada
-        pub only_games: bool,
+        /// clips en segundo plano: BG_OFF, BG_GAMES (solo mientras hay un juego) o BG_ALWAYS
+        pub bg: u32,
+        /// tecla para empezar/frenar una grabación manual
+        pub rec: Hotkey,
         pub mic: bool,
         pub sound: bool,
     }
@@ -41,7 +47,8 @@ mod logic {
                 shot: Hotkey { vk: VK_F10, mods: 0 },
                 folder,
                 encoder: 0,
-                only_games: true,
+                bg: BG_GAMES,
+                rec: Hotkey { vk: VK_F8, mods: 0 },
                 mic: false,
                 sound: true,
             }
@@ -62,22 +69,26 @@ mod logic {
                     ("shot_mods", Some(n)) => c.shot.mods = n & 7,
                     ("encoder", Some(n)) if (n as usize) < ENCODERS.len() => c.encoder = n as usize,
                     ("folder", _) if !v.is_empty() => c.folder = v.to_string(),
-                    ("only_games", Some(n)) if n <= 1 => c.only_games = n == 1,
+                    ("bg", Some(n)) if n <= BG_ALWAYS => c.bg = n,
+                    ("only_games", Some(0)) => c.bg = BG_ALWAYS, // config de la versión 0.3
+                    ("rec_key", Some(n)) if (1..=254).contains(&n) => c.rec.vk = n,
+                    ("rec_mods", Some(n)) => c.rec.mods = n & 7,
                     ("mic", Some(n)) if n <= 1 => c.mic = n == 1,
                     ("sound", Some(n)) if n <= 1 => c.sound = n == 1,
                     _ => {}
                 }
             }
-            if c.clip == c.shot {
+            if c.clip == c.shot || c.rec == c.clip || c.rec == c.shot {
                 c.clip = Hotkey { vk: VK_F9, mods: 0 };
                 c.shot = Hotkey { vk: VK_F10, mods: 0 };
+                c.rec = Hotkey { vk: VK_F8, mods: 0 };
             }
             c
         }
 
         pub fn serialize(&self) -> String {
             format!(
-                "seconds={}\nfps={}\nclip_key={}\nclip_mods={}\nshot_key={}\nshot_mods={}\nfolder={}\nencoder={}\nonly_games={}\nmic={}\nsound={}\n",
+                "seconds={}\nfps={}\nclip_key={}\nclip_mods={}\nshot_key={}\nshot_mods={}\nfolder={}\nencoder={}\nbg={}\nrec_key={}\nrec_mods={}\nmic={}\nsound={}\n",
                 self.secs,
                 self.fps,
                 self.clip.vk,
@@ -86,7 +97,9 @@ mod logic {
                 self.shot.mods,
                 self.folder,
                 self.encoder,
-                self.only_games as u8,
+                self.bg,
+                self.rec.vk,
+                self.rec.mods,
                 self.mic as u8,
                 self.sound as u8
             )
@@ -145,8 +158,9 @@ mod logic {
     const NV: &[&str] = &["-preset", "p1", "-tune", "ll", "-rc", "cbr"];
     const AMF: &[&str] = &["-usage", "lowlatency", "-quality", "speed", "-rc", "cbr"];
     const QSV: &[&str] = &["-preset", "veryfast"];
-    const GPU: &str = "scale_d3d11=width=-2:height=720:format=nv12";
-    const CPU: &str = "hwdownload,format=bgra,scale=-2:720:flags=fast_bilinear,format=nv12";
+    // a 720p como máximo (una ventana chica no se agranda)
+    const GPU: &str = "scale_d3d11=width=-2:height=min(720\\,ih):format=nv12";
+    const CPU: &str = "hwdownload,format=bgra,scale=-2:min(720\\,ih):flags=fast_bilinear,format=nv12";
 
     /// Orden de prueba: todo en GPU primero, después escalado en CPU, último x264.
     pub const ENCODERS: [Enc; 7] = [
@@ -154,7 +168,7 @@ mod logic {
         Enc { label: "AMF", vf: GPU, codec: "h264_amf", opts: AMF },
         Enc {
             label: "QSV",
-            vf: "scale_d3d11=width=-2:height=720:format=nv12,hwmap=derive_device=qsv,format=qsv",
+            vf: "scale_d3d11=width=-2:height=min(720\\,ih):format=nv12,hwmap=derive_device=qsv,format=qsv",
             codec: "h264_qsv",
             opts: QSV,
         },
@@ -181,8 +195,27 @@ mod logic {
         v.iter().map(|x| x.to_string()).collect()
     }
 
-    /// Grabación continua a segmentos .ts en `dir`. audio = (Hz, canales) de PCM f32 por stdin.
-    pub fn record_args(enc: usize, fps: u32, secs: u32, audio: Option<(u32, u16)>, dir: &str) -> Vec<String> {
+    /// Dónde escribe ffmpeg: segmentos rotativos (clips en segundo plano) o un archivo (grabación manual).
+    pub enum Out<'a> {
+        Segments { secs: u32, dir: &'a str },
+        File(&'a str),
+    }
+
+    /// Zona de la pantalla principal a grabar: (x, y, ancho, alto). None = pantalla completa.
+    pub type Region = Option<(i32, i32, i32, i32)>;
+
+    /// Ajusta una ventana (izq, arriba, der, abajo) a la pantalla (ancho, alto), con medidas pares.
+    pub fn window_region(win: (i32, i32, i32, i32), screen: (i32, i32)) -> Option<(i32, i32, i32, i32)> {
+        let l = win.0.clamp(0, screen.0);
+        let t = win.1.clamp(0, screen.1);
+        let r = win.2.clamp(0, screen.0);
+        let b = win.3.clamp(0, screen.1);
+        let (w, h) = ((r - l) & !1, (b - t) & !1);
+        (w >= 64 && h >= 64).then_some((l, t, w, h))
+    }
+
+    /// Argumentos de grabación. audio = (Hz, canales) de PCM f32 por stdin.
+    pub fn record_args(enc: usize, fps: u32, region: Region, audio: Option<(u32, u16)>, out: Out) -> Vec<String> {
         let e = &ENCODERS[enc];
         let br = bitrate_mbit(fps);
         // un solo hilo de filtros: todo el trabajo pesado está en la GPU
@@ -191,7 +224,11 @@ mod logic {
             a.push("-nostdin".into());
         }
         a.extend(s(&["-f", "lavfi", "-i"]));
-        a.push(format!("ddagrab=framerate={fps}:draw_mouse=1"));
+        let mut src = format!("ddagrab=framerate={fps}:draw_mouse=1");
+        if let Some((x, y, w, h)) = region {
+            src.push_str(&format!(":video_size={w}x{h}:offset_x={x}:offset_y={y}"));
+        }
+        a.push(src);
         if let Some((rate, ch)) = audio {
             // sin probesize/analyzeduration ffmpeg lee ~5 s de audio antes de arrancar el video (desfase)
             a.extend(s(&["-thread_queue_size", "1024", "-probesize", "32", "-analyzeduration", "0", "-f", "f32le", "-ar"]));
@@ -219,10 +256,16 @@ mod logic {
         if audio.is_some() {
             a.extend(s(&["-c:a", "aac", "-b:a", "160k"]));
         }
-        a.extend(s(&["-f", "segment", "-segment_time", "2", "-segment_wrap"]));
-        a.push(segment_wrap(secs).to_string());
-        a.extend(s(&["-segment_format", "mpegts"]));
-        a.push(format!("{dir}\\seg%03d.ts"));
+        match out {
+            Out::Segments { secs, dir } => {
+                a.extend(s(&["-f", "segment", "-segment_time", "2", "-segment_wrap"]));
+                a.push(segment_wrap(secs).to_string());
+                a.extend(s(&["-segment_format", "mpegts"]));
+                a.push(format!("{dir}\\seg%03d.ts"));
+            }
+            // .ts: si algo se corta, lo grabado hasta ahí sigue sirviendo
+            Out::File(path) => a.extend(s(&["-y", "-f", "mpegts", path])),
+        }
         a
     }
 
@@ -232,6 +275,21 @@ mod logic {
         a.push(format!("concat:{}", segs.join("|")));
         a.extend(s(&["-map", "0", "-c", "copy", "-movflags", "+faststart", out]));
         a
+    }
+
+    /// Pasa una grabación .ts a .mp4 sin recodificar.
+    pub fn remux_args(input: &str, out: &str) -> Vec<String> {
+        s(&["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i", input, "-map", "0", "-c", "copy", "-movflags", "+faststart", out])
+    }
+
+    /// "1:05:09" / "3:07"
+    pub fn fmt_elapsed(secs: u64) -> String {
+        let (h, m, s) = (secs / 3600, secs / 60 % 60, secs % 60);
+        if h > 0 {
+            format!("{h}:{m:02}:{s:02}")
+        } else {
+            format!("{m}:{s:02}")
+        }
     }
 
     /// Captura de pantalla completa en PNG (descarta los primeros cuadros, que pueden salir negros).
@@ -342,7 +400,8 @@ mod logic {
             c.fps = 60;
             c.clip = Hotkey { vk: 0x41, mods: MOD_CONTROL | MOD_SHIFT };
             c.encoder = 3;
-            c.only_games = false;
+            c.bg = BG_OFF;
+            c.rec = Hotkey { vk: 0x52, mods: MOD_ALT };
             c.mic = true;
             c.sound = false;
             c.folder = "D:\\Mis clips\\Jugadon".into();
@@ -365,11 +424,16 @@ mod logic {
         #[test]
         fn new_options_default_and_parse() {
             let d = Config::defaults("F".into());
-            assert!(d.only_games && !d.mic && d.sound);
-            let c = Config::parse("only_games=0\nmic=1\nsound=0\n", "F".into());
-            assert!(!c.only_games && c.mic && !c.sound);
-            let c = Config::parse("only_games=7\nmic=x\n", "F".into());
-            assert!(c.only_games && !c.mic);
+            assert!(d.bg == BG_GAMES && !d.mic && d.sound && d.rec.vk == VK_F8);
+            let c = Config::parse("bg=0\nmic=1\nsound=0\n", "F".into());
+            assert!(c.bg == BG_OFF && c.mic && !c.sound);
+            let c = Config::parse("bg=7\nmic=x\n", "F".into());
+            assert!(c.bg == BG_GAMES && !c.mic);
+            // config vieja (0.3): only_games=0 -> siempre
+            assert_eq!(Config::parse("only_games=0\n", "F".into()).bg, BG_ALWAYS);
+            // tecla de grabar repetida -> defaults
+            let c = Config::parse("rec_key=120\n", "F".into());
+            assert_eq!((c.clip.vk, c.shot.vk, c.rec.vk), (VK_F9, VK_F10, VK_F8));
         }
 
         #[test]
@@ -437,11 +501,11 @@ mod logic {
 
         #[test]
         fn record_args_gpu_with_audio() {
-            let a = record_args(0, 60, 30, Some((48000, 2)), "C:\\T\\jugadon_buf").join(" ");
+            let a = record_args(0, 60, None, Some((48000, 2)), Out::Segments { secs: 30, dir: "C:\\T\\jugadon_buf" }).join(" ");
             assert!(a.contains("-f lavfi -i ddagrab=framerate=60:draw_mouse=1"));
             assert!(a.starts_with("-hide_banner -loglevel warning -nostats -filter_threads 1 -f lavfi"));
             assert!(a.contains("-thread_queue_size 1024 -probesize 32 -analyzeduration 0 -f f32le -ar 48000 -ac 2 -i pipe:0 -map 0:v -map 1:a"));
-            assert!(a.contains("-vf scale_d3d11=width=-2:height=720:format=nv12 -c:v h264_nvenc -preset p1 -tune ll -rc cbr"));
+            assert!(a.contains("-vf scale_d3d11=width=-2:height=min(720\\,ih):format=nv12 -c:v h264_nvenc -preset p1 -tune ll -rc cbr"));
             assert!(a.contains("-b:v 9M -maxrate 9M -bufsize 18M -g 120 -bf 0"));
             assert!(a.contains("-c:a aac -b:a 160k"));
             assert!(a.ends_with("-f segment -segment_time 2 -segment_wrap 20 -segment_format mpegts C:\\T\\jugadon_buf\\seg%03d.ts"));
@@ -451,17 +515,40 @@ mod logic {
 
         #[test]
         fn record_args_cpu_no_audio() {
-            let a = record_args(6, 30, 60, None, "D").join(" ");
+            let a = record_args(6, 30, None, None, Out::Segments { secs: 60, dir: "D" }).join(" ");
             assert!(a.contains("-nostdin"));
-            assert!(a.contains("-map 0:v -vf hwdownload,format=bgra,scale=-2:720"));
+            assert!(a.contains("-map 0:v -vf hwdownload,format=bgra,scale=-2:min(720\\,ih)"));
             assert!(a.contains("-c:v libx264 -preset ultrafast"));
             assert!(a.contains("-b:v 6M"));
             assert!(a.contains("-g 60"));
             assert!(!a.contains("pipe:0"));
             assert!(!a.contains("-c:a"));
             for i in 0..ENCODERS.len() {
-                assert!(record_args(i, 30, 30, None, "D").iter().any(|x| x == ENCODERS[i].codec));
+                assert!(record_args(i, 30, None, None, Out::File("x.ts")).iter().any(|x| x == ENCODERS[i].codec));
             }
+        }
+
+        #[test]
+        fn manual_recording_args() {
+            let a = record_args(0, 30, Some((100, 50, 1280, 720)), None, Out::File("C:\\T\\rec.ts")).join(" ");
+            assert!(a.contains("-i ddagrab=framerate=30:draw_mouse=1:video_size=1280x720:offset_x=100:offset_y=50 "));
+            assert!(a.ends_with("-y -f mpegts C:\\T\\rec.ts"));
+            assert!(!a.contains("segment"));
+            let r = remux_args("a.ts", "b.mp4").join(" ");
+            assert!(r.contains("-i a.ts -map 0 -c copy -movflags +faststart b.mp4"));
+            assert_eq!(fmt_elapsed(187), "3:07");
+            assert_eq!(fmt_elapsed(3909), "1:05:09");
+        }
+
+        #[test]
+        fn window_regions() {
+            // ventana normal: medidas pares
+            assert_eq!(window_region((101, 51, 900, 650), (1920, 1080)), Some((101, 51, 798, 598)));
+            // se sale de la pantalla: se recorta
+            assert_eq!(window_region((-50, -20, 2000, 1100), (1920, 1080)), Some((0, 0, 1920, 1080)));
+            // fuera de la pantalla o muy chica
+            assert_eq!(window_region((3000, 0, 3500, 500), (1920, 1080)), None);
+            assert_eq!(window_region((0, 0, 40, 40), (1920, 1080)), None);
         }
 
         #[test]
@@ -503,7 +590,8 @@ mod win_tests {
         let dir = std::env::temp_dir().join("jugadon_test_buf");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let mut args = logic::record_args(6, 30, 6, Some((48000, 2)), &dir.to_string_lossy());
+        let dirs = dir.to_string_lossy().into_owned();
+        let mut args = logic::record_args(6, 30, None, Some((48000, 2)), logic::Out::Segments { secs: 6, dir: &dirs });
         for a in args.iter_mut() {
             if a.starts_with("ddagrab=") {
                 *a = "testsrc2=size=1920x1080:rate=30,realtime".into();
@@ -568,6 +656,50 @@ mod win_tests {
     }
 }
 
+#[cfg(all(test, windows))]
+mod win_tests_manual {
+    use crate::logic;
+    use std::process::{Command, Stdio};
+    use std::time::Duration;
+
+    /// Grabación manual: ffmpeg escribe un .ts, se corta de golpe (como al frenar) y se pasa a .mp4.
+    #[test]
+    fn manual_recording_kill_and_remux() {
+        let Ok(ff) = std::env::var("RCLIP_FFMPEG") else {
+            eprintln!("RCLIP_FFMPEG no definido: se saltea");
+            return;
+        };
+        let tmp = std::env::temp_dir();
+        let ts = tmp.join("jugadon_test_rec.ts").to_string_lossy().into_owned();
+        let mp4 = tmp.join("jugadon_test_rec.mp4").to_string_lossy().into_owned();
+        let mut args = logic::record_args(6, 30, Some((0, 0, 800, 600)), None, logic::Out::File(&ts));
+        for a in args.iter_mut() {
+            if a.starts_with("ddagrab=") {
+                *a = "testsrc2=size=800x600:rate=30,realtime".into();
+            } else if a.starts_with("hwdownload,format=bgra,") {
+                *a = a.replacen("hwdownload,format=bgra,", "", 1);
+            }
+        }
+        let mut child = Command::new(&ff).args(&args).stdout(Stdio::null()).spawn().unwrap();
+        std::thread::sleep(Duration::from_secs(4));
+        let _ = child.kill(); // frenar = matar ffmpeg; el .ts tiene que seguir sirviendo
+        let _ = child.wait();
+        let st = Command::new(&ff).args(logic::remux_args(&ts, &mp4)).status().unwrap();
+        assert!(st.success(), "falló el remux");
+        let probe = std::path::Path::new(&ff).with_file_name("ffprobe.exe");
+        let o = Command::new(probe)
+            .args(["-v", "error", "-show_entries", "stream=codec_name,height:format=duration", "-of", "default=nw=1", &mp4])
+            .output()
+            .unwrap();
+        let info = String::from_utf8_lossy(&o.stdout).to_string();
+        eprintln!("{info}");
+        // 600 px de alto: una ventana chica no se agranda a 720
+        assert!(info.contains("codec_name=h264") && info.contains("height=600"), "{info}");
+        let dur: f64 = info.lines().find_map(|l| l.strip_prefix("duration=")).and_then(|v| v.parse().ok()).unwrap_or(0.0);
+        assert!((1.5..=5.0).contains(&dur), "duración rara: {dur}");
+    }
+}
+
 #[cfg(windows)]
 fn main() {
     app::run();
@@ -580,7 +712,7 @@ fn main() {
 
 #[cfg(windows)]
 mod app {
-    use crate::logic::{self, Config, Hotkey, DURATIONS, ENCODERS};
+    use crate::logic::{self, Config, Hotkey, Region, BG_ALWAYS, BG_GAMES, BG_OFF, DURATIONS, ENCODERS};
     use std::cell::RefCell;
     use std::fs::{self, File, OpenOptions};
     use std::io::Write;
@@ -638,6 +770,18 @@ mod app {
         audio: bool,
     }
 
+    struct Manual {
+        child: Option<Child>,
+        enc: usize,
+        tried: usize,
+        started: Instant,
+        t0: Instant,
+        ts: PathBuf,
+        region: Region,
+        what: String,
+        audio: bool,
+    }
+
     struct App {
         hwnd: HWND,
         cfg: Config,
@@ -647,6 +791,11 @@ mod app {
         log_path: PathBuf,
         icon_on: HICON,
         icon_off: HICON,
+        icon_rec: HICON,
+        /// grabación manual en curso (F8 o "Grabar ventana")
+        manual: Option<Manual>,
+        rec_dir: PathBuf,
+        menu_windows: Vec<(HWND, String)>,
         rec: Rec,
         binding: u8,
         hook: Option<HHOOK>,
@@ -773,6 +922,68 @@ mod app {
         Ok(child)
     }
 
+    unsafe extern "system" fn enum_cb(hwnd: HWND, lp: LPARAM) -> windows::core::BOOL {
+        use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
+        let list = &mut *(lp.0 as *mut Vec<(HWND, String)>);
+        if list.len() >= 20 || !IsWindowVisible(hwnd).as_bool() || hwnd.0 as isize == MAIN_HWND.load(Ordering::Relaxed) {
+            return TRUE;
+        }
+        if GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TOOLWINDOW.0 != 0 || GetWindow(hwnd, GW_OWNER).is_ok_and(|o| !o.is_invalid()) {
+            return TRUE;
+        }
+        let mut cloaked = 0u32;
+        let _ = DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &mut cloaked as *mut u32 as _, 4);
+        if cloaked != 0 {
+            return TRUE;
+        }
+        let mut buf = [0u16; 128];
+        let n = GetWindowTextW(hwnd, &mut buf).max(0) as usize;
+        let title = String::from_utf16_lossy(&buf[..n]);
+        let title = title.trim();
+        if !title.is_empty() && title != "Program Manager" {
+            let short: String = title.chars().take(50).collect();
+            list.push((hwnd, if short.len() < title.len() { format!("{short}…") } else { short }));
+        }
+        TRUE
+    }
+
+    /// Ventanas abiertas que se pueden grabar (para el submenú "Grabar ventana").
+    fn list_windows() -> Vec<(HWND, String)> {
+        let mut v: Vec<(HWND, String)> = Vec::new();
+        unsafe {
+            let _ = EnumWindows(Some(enum_cb), LPARAM(&mut v as *mut _ as isize));
+        }
+        v
+    }
+
+    /// Rectángulo visible de la ventana (sin la sombra), en píxeles reales.
+    fn window_rect(hwnd: HWND) -> Option<(i32, i32, i32, i32)> {
+        use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS};
+        unsafe {
+            let mut r = RECT::default();
+            if DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &mut r as *mut RECT as _, std::mem::size_of::<RECT>() as u32).is_err() {
+                GetWindowRect(hwnd, &mut r).ok()?;
+            }
+            Some((r.left, r.top, r.right, r.bottom))
+        }
+    }
+
+    /// Pasa la grabación .ts a .mp4 (prioridad baja) y avisa. Si falla, deja el .ts.
+    fn remux_in_background(ffmpeg: PathBuf, log: PathBuf, ts: PathBuf, out: PathBuf, msg: String) {
+        std::thread::spawn(move || {
+            let args = logic::remux_args(&ts.to_string_lossy(), &out.to_string_lossy());
+            let mut cmd = Command::new(ffmpeg);
+            cmd.args(&args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(log_stdio(&log));
+            let ok = spawn_hidden(&mut cmd, IDLE).and_then(|mut c| c.wait()).is_ok_and(|s| s.success());
+            if ok {
+                let _ = fs::remove_file(&ts);
+                post_text(format!("{msg}\nClic acá para verla."), Some(out.to_string_lossy().into_owned()));
+            } else {
+                post_text(format!("No pude pasar la grabación a mp4. Quedó en {}", ts.display()), None);
+            }
+        });
+    }
+
     /// Aviso desde un hilo de trabajo: (texto, archivo creado).
     fn post_text(text: String, file: Option<String>) {
         let hwnd = HWND(MAIN_HWND.load(Ordering::Relaxed) as _);
@@ -809,11 +1020,24 @@ mod app {
             }
         }
 
+        /// ¿Tiene que estar corriendo el buffer de clips en segundo plano?
         fn want_rec(&self) -> bool {
-            !self.cfg.only_games || self.last_game.is_some_and(|t| t.elapsed() < GAME_GRACE)
+            self.manual.is_none()
+                && match self.cfg.bg {
+                    BG_OFF => false,
+                    BG_ALWAYS => true,
+                    _ => self.last_game.is_some_and(|t| t.elapsed() < GAME_GRACE),
+                }
         }
 
         fn status(&self) -> String {
+            if let Some(m) = &self.manual {
+                let a = if m.audio { "" } else { ", sin audio" };
+                return format!("● Grabando {} – {}{a}", m.what, logic::fmt_elapsed(m.t0.elapsed().as_secs()));
+            }
+            if self.cfg.bg == BG_OFF {
+                return "Clips en segundo plano: apagado".to_string();
+            }
             if self.rec.child.is_some() && self.rec.good {
                 let audio = if !self.rec.audio {
                     ", sin audio"
@@ -837,7 +1061,9 @@ mod app {
         }
 
         fn icon(&self) -> HICON {
-            if self.rec.child.is_some() {
+            if self.manual.is_some() {
+                self.icon_rec
+            } else if self.rec.child.is_some() {
                 self.icon_on
             } else {
                 self.icon_off
@@ -885,7 +1111,7 @@ mod app {
 
         fn register_keys(&self) {
             let mut bad = Vec::new();
-            for (id, h) in [(1, self.cfg.clip), (2, self.cfg.shot)] {
+            for (id, h) in [(1, self.cfg.clip), (2, self.cfg.shot), (3, self.cfg.rec)] {
                 unsafe {
                     let _ = UnregisterHotKey(Some(self.hwnd), id);
                     let mods = HOT_KEY_MODIFIERS(h.mods | MOD_NOREPEAT.0);
@@ -917,19 +1143,17 @@ mod app {
             }
         }
 
-        fn spawn_rec(&mut self) {
-            self.clear_buf();
-            let enc = self.rec.enc;
+        /// Lanza ffmpeg grabando (audio por pipe si se puede). Devuelve (proceso, ¿con audio?).
+        fn launch(&self, enc: usize, region: Region, out: logic::Out) -> (Option<Child>, bool) {
             // audio: captura WASAPI + pipe chico hacia el stdin de ffmpeg; si algo falla, solo video
             let audio = match crate::audio::start(self.cfg.mic) {
                 Some(a) => crate::audio::small_pipe().map(|p| (a, p)),
                 None => None,
             };
             let fmt = audio.as_ref().map(|(a, _)| (a.rate, a.channels));
-            let dir = self.buf_dir.to_string_lossy().into_owned();
-            let args = logic::record_args(enc, self.cfg.fps, self.cfg.secs, fmt, &dir);
+            let args = logic::record_args(enc, self.cfg.fps, region, fmt, out);
             let audio_desc = fmt.map_or("no".to_string(), |f| format!("{} Hz, {} canales", f.0, f.1));
-            log_line(&self.log_path, &format!("iniciando {} {} fps (audio: {audio_desc})", ENCODERS[enc].label, self.cfg.fps));
+            log_line(&self.log_path, &format!("iniciando {} {} fps (audio: {audio_desc}, zona: {region:?})", ENCODERS[enc].label, self.cfg.fps));
             let mut cmd = Command::new(&self.ffmpeg);
             cmd.args(&args).stdout(Stdio::null()).stderr(log_stdio(&self.log_path));
             let feed = match audio {
@@ -942,23 +1166,130 @@ mod app {
                     None
                 }
             };
-            self.rec.started = Instant::now();
-            self.rec.next_try = None;
-            self.rec.audio = feed.is_some();
-            match spawn_hidden(&mut cmd, BELOW_NORMAL) {
+            let has_audio = feed.is_some();
+            let child = match spawn_hidden(&mut cmd, BELOW_NORMAL) {
                 Ok(child) => {
-                    self.rec.child = Some(child);
                     if let Some((a, w)) = feed {
                         a.feed(w);
                     }
+                    Some(child)
                 }
                 Err(e) => {
                     log_line(&self.log_path, &format!("no se pudo lanzar ffmpeg: {e}"));
-                    self.rec.child = None;
+                    None
+                }
+            };
+            drop(cmd); // cierra nuestra copia del extremo de lectura del pipe
+            (child, has_audio)
+        }
+
+        fn spawn_rec(&mut self) {
+            self.clear_buf();
+            let dir = self.buf_dir.to_string_lossy().into_owned();
+            let (child, audio) = self.launch(self.rec.enc, None, logic::Out::Segments { secs: self.cfg.secs, dir: &dir });
+            self.rec.started = Instant::now();
+            self.rec.next_try = None;
+            self.rec.child = child;
+            self.rec.audio = audio;
+            self.update_tip();
+        }
+
+        // ---------- grabación manual ----------
+
+        fn spawn_manual(&mut self) {
+            let Some(m) = self.manual.as_ref() else { return };
+            let (enc, region, ts) = (m.enc, m.region, m.ts.to_string_lossy().into_owned());
+            let (child, audio) = self.launch(enc, region, logic::Out::File(&ts));
+            if let Some(m) = self.manual.as_mut() {
+                m.child = child;
+                m.audio = audio;
+                m.started = Instant::now();
+            }
+        }
+
+        fn start_manual(&mut self, region: Region, what: String) {
+            if self.manual.is_some() {
+                return;
+            }
+            // mientras grabás a mano, el buffer de clips se pausa (no grabar dos veces lo mismo)
+            self.stop_rec();
+            self.clear_buf();
+            let _ = fs::create_dir_all(&self.rec_dir);
+            let ts = self.rec_dir.join(format!("grabacion_{}.ts", now_stamp()));
+            let now = Instant::now();
+            self.manual = Some(Manual { child: None, enc: self.cfg.encoder, tried: 0, started: now, t0: now, ts, region, what, audio: false });
+            self.spawn_manual();
+            self.play_sound();
+            let what = self.manual.as_ref().map(|m| m.what.clone()).unwrap_or_default();
+            self.notify(&format!("Grabando {what}. Apretá {} para frenar y guardar.", hk(self.cfg.rec)), false);
+            self.update_tip();
+        }
+
+        /// Frena la grabación manual y la guarda como mp4.
+        fn finish_manual(&mut self, cut: bool) {
+            let Some(mut m) = self.manual.take() else { return };
+            if let Some(mut c) = m.child.take() {
+                let _ = c.kill();
+                let _ = c.wait();
+            }
+            self.update_tip();
+            let len = fs::metadata(&m.ts).map(|x| x.len()).unwrap_or(0);
+            let Some(dir) = self.out_dir() else {
+                self.notify("No pude crear la carpeta de clips.", true);
+                return;
+            };
+            if len == 0 {
+                let _ = fs::remove_file(&m.ts);
+                self.notify("No se grabó nada (mirá %TEMP%\\jugadon.log).", true);
+                return;
+            }
+            self.play_sound();
+            let name = format!("grabacion_{}.mp4", now_stamp());
+            let dur = logic::fmt_elapsed(m.t0.elapsed().as_secs());
+            let msg = if cut {
+                format!("La grabación se cortó; se guardó lo grabado ({dur}): {name}")
+            } else {
+                format!("Grabación guardada ({dur}): {name}")
+            };
+            remux_in_background(self.ffmpeg.clone(), self.log_path.clone(), m.ts, dir.join(name), msg);
+            self.last_trim = None;
+        }
+
+        fn toggle_manual_screen(&mut self) {
+            if self.manual.is_some() {
+                self.finish_manual(false);
+            } else {
+                self.start_manual(None, "la pantalla".to_string());
+            }
+        }
+
+        fn record_window(&mut self, idx: usize) {
+            let Some((hwnd, title)) = self.menu_windows.get(idx).cloned() else { return };
+            unsafe {
+                if IsIconic(hwnd).as_bool() {
+                    let _ = ShowWindow(hwnd, SW_RESTORE);
+                }
+                let _ = SetForegroundWindow(hwnd);
+            }
+            let screen = unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) };
+            match window_rect(hwnd).and_then(|r| logic::window_region(r, screen)) {
+                Some(region) => self.start_manual(Some(region), format!("\"{title}\"")),
+                None => self.notify("Esa ventana no está en la pantalla principal (o es muy chica). Movela y probá de nuevo.", true),
+            }
+        }
+
+        /// Grabaciones que quedaron a medias (se cortó la luz, se colgó la PC…): se pasan a mp4.
+        fn recover_recordings(&self) {
+            let Ok(rd) = fs::read_dir(&self.rec_dir) else { return };
+            let Some(dir) = self.out_dir() else { return };
+            for (i, e) in rd.flatten().enumerate() {
+                let p = e.path();
+                if p.extension().is_some_and(|x| x == "ts") && e.metadata().is_ok_and(|m| m.len() > 0) {
+                    let name = format!("grabacion_recuperada_{}_{i}.mp4", now_stamp());
+                    let msg = format!("Recuperé una grabación que había quedado a medias: {name}");
+                    remux_in_background(self.ffmpeg.clone(), self.log_path.clone(), p, dir.join(name), msg);
                 }
             }
-            drop(cmd); // cierra nuestra copia del extremo de lectura del pipe
-            self.update_tip();
         }
 
         fn restart_rec(&mut self) {
@@ -977,10 +1308,27 @@ mod app {
         /// Watchdog: cada 2 s.
         fn tick(&mut self) {
             let now = Instant::now();
-            if self.cfg.only_games {
-                if fullscreen_app() {
-                    self.last_game = Some(now);
+            if let Some(m) = self.manual.as_mut() {
+                if let Some(c) = m.child.as_mut() {
+                    if let Ok(None) = c.try_wait() {
+                        self.update_tip(); // muestra el tiempo grabado
+                        return;
+                    }
                 }
+                // ffmpeg de la grabación manual terminó solo
+                if m.started.elapsed() < QUICK_DEATH && m.tried + 1 < ENCODERS.len() {
+                    m.tried += 1;
+                    m.enc = (m.enc + 1) % ENCODERS.len();
+                    self.spawn_manual();
+                } else {
+                    self.finish_manual(true);
+                }
+                return;
+            }
+            if self.cfg.bg == BG_GAMES && fullscreen_app() {
+                self.last_game = Some(now);
+            }
+            {
                 if !self.want_rec() {
                     // al próximo juego se vuelve a intentar desde cero
                     self.rec.gave_up = false;
@@ -988,7 +1336,7 @@ mod app {
                     if self.rec.child.is_some() {
                         self.stop_rec();
                         self.clear_buf();
-                        log_line(&self.log_path, "sin juego en pantalla: grabación en pausa");
+                        log_line(&self.log_path, "clips en segundo plano en pausa");
                         self.update_tip();
                         self.last_trim = None;
                     }
@@ -1057,8 +1405,12 @@ mod app {
 
         fn save_clip(&self) {
             if self.rec.child.is_none() {
-                if !self.want_rec() {
-                    self.notify("En pausa: Jugadón graba solo cuando hay un juego en pantalla completa. Se cambia en Opciones.", false);
+                if self.manual.is_some() {
+                    self.notify(&format!("Estás grabando a mano: apretá {} para frenar y guardar.", hk(self.cfg.rec)), false);
+                } else if self.cfg.bg == BG_OFF {
+                    self.notify(&format!("Los clips en segundo plano están apagados (menú → Clips en segundo plano). Para grabar a mano: {}.", hk(self.cfg.rec)), false);
+                } else if !self.want_rec() {
+                    self.notify("En pausa: los clips se graban solo mientras hay un juego en pantalla completa. Se cambia en el menú → Clips en segundo plano.", false);
                 } else {
                     self.notify("No está grabando todavía. Mirá %TEMP%\\jugadon.log", true);
                 }
@@ -1177,7 +1529,7 @@ mod app {
             unsafe {
                 SetTimer(Some(self.hwnd), TIMER_BIND, 15_000, None);
             }
-            let what = if which == 1 { "guardar clip" } else { "captura" };
+            let what = ["", "guardar clip", "captura", "grabar/frenar"][which as usize];
             self.notify(&format!("Apretá la tecla nueva para {what} (podés sumar Ctrl/Alt/Shift). Esc cancela."), false);
         }
 
@@ -1197,23 +1549,24 @@ mod app {
                 return;
             }
             let new = Hotkey { vk, mods };
-            let other = if which == 1 { self.cfg.shot } else { self.cfg.clip };
-            if new == other {
-                self.notify(&format!("{} ya está usada para la otra acción.", hk(new)), true);
+            let keys = [self.cfg.clip, self.cfg.shot, self.cfg.rec];
+            if keys.iter().enumerate().any(|(i, k)| i + 1 != which as usize && *k == new) {
+                self.notify(&format!("{} ya está usada para otra acción.", hk(new)), true);
                 return;
             }
-            if which == 1 {
-                self.cfg.clip = new;
-            } else {
-                self.cfg.shot = new;
+            match which {
+                1 => self.cfg.clip = new,
+                2 => self.cfg.shot = new,
+                _ => self.cfg.rec = new,
             }
             self.save_cfg();
             self.register_keys();
-            let what = if which == 1 { "Guardar clip" } else { "Captura" };
+            let what = ["", "Guardar clip", "Captura", "Grabar/frenar"][which as usize];
             self.notify(&format!("{what}: {}", hk(new)), false);
         }
 
-        fn build_menu(&self) -> HMENU {
+        fn build_menu(&mut self) -> HMENU {
+            self.menu_windows = if self.manual.is_none() { list_windows() } else { Vec::new() };
             unsafe {
                 let m = CreatePopupMenu().unwrap_or_default();
                 let add = |menu: HMENU, id: usize, text: &str, checked: bool| {
@@ -1229,14 +1582,35 @@ mod app {
                 sep(m);
                 add(m, 1, &format!("Guardar clip\t{}", hk(self.cfg.clip)), false);
                 add(m, 2, &format!("Captura\t{}", hk(self.cfg.shot)), false);
+                if self.manual.is_some() {
+                    add(m, 4, &format!("■ Frenar y guardar grabación\t{}", hk(self.cfg.rec)), false);
+                } else {
+                    add(m, 4, &format!("● Grabar pantalla completa\t{}", hk(self.cfg.rec)), false);
+                    let w = CreatePopupMenu().unwrap_or_default();
+                    if self.menu_windows.is_empty() {
+                        let t = wide("(no hay ventanas)");
+                        let _ = AppendMenuW(w, MF_STRING | MF_GRAYED, 0, PCWSTR(t.as_ptr()));
+                    }
+                    for (i, (_, title)) in self.menu_windows.iter().enumerate() {
+                        add(w, 100 + i, &title.replace('&', "&&"), false);
+                    }
+                    let t = wide("● Grabar una ventana");
+                    let _ = AppendMenuW(m, MF_POPUP, w.0 as usize, PCWSTR(t.as_ptr()));
+                }
                 add(m, 3, "Copiar último clip (para pegar en Discord)", false);
                 sep(m);
+                let bg = CreatePopupMenu().unwrap_or_default();
+                add(bg, 46, "Solo mientras juego (recomendado)", self.cfg.bg == BG_GAMES);
+                add(bg, 47, "Siempre", self.cfg.bg == BG_ALWAYS);
+                add(bg, 45, "Apagado (solo grabo a mano)", self.cfg.bg == BG_OFF);
+                let t = wide("Clips en segundo plano");
+                let _ = AppendMenuW(m, MF_POPUP, bg.0 as usize, PCWSTR(t.as_ptr()));
                 let dur = CreatePopupMenu().unwrap_or_default();
                 for (i, s) in DURATIONS.iter().enumerate() {
                     let label = if *s < 60 { format!("{s} s") } else { format!("{} min", s / 60) };
                     add(dur, 10 + i, &label, self.cfg.secs == *s);
                 }
-                let t = wide("Duración");
+                let t = wide("Duración del clip");
                 let _ = AppendMenuW(m, MF_POPUP, dur.0 as usize, PCWSTR(t.as_ptr()));
                 let q = CreatePopupMenu().unwrap_or_default();
                 add(q, 20, "720p 30 fps", self.cfg.fps == 30);
@@ -1244,12 +1618,12 @@ mod app {
                 let t = wide("Calidad");
                 let _ = AppendMenuW(m, MF_POPUP, q.0 as usize, PCWSTR(t.as_ptr()));
                 let o = CreatePopupMenu().unwrap_or_default();
-                add(o, 42, "Grabar solo en juegos (ahorra recursos)", self.cfg.only_games);
                 add(o, 43, "Grabar micrófono", self.cfg.mic);
                 add(o, 44, "Sonido al guardar", self.cfg.sound);
                 sep(o);
                 add(o, 30, "Tecla de clip…", false);
                 add(o, 31, "Tecla de captura…", false);
+                add(o, 32, "Tecla de grabar/frenar…", false);
                 sep(o);
                 add(o, 41, "Iniciar con Windows", autostart_enabled());
                 let t = wide("Opciones");
@@ -1267,13 +1641,23 @@ mod app {
                 1 => self.save_clip(),
                 2 => self.screenshot(),
                 3 => self.copy_last_clip(),
-                42 => {
-                    self.cfg.only_games = !self.cfg.only_games;
-                    self.save_cfg();
-                    if self.cfg.only_games {
-                        self.notify("Ahora graba solo cuando hay un juego en pantalla completa.", false);
+                4 => self.toggle_manual_screen(),
+                100..=119 => self.record_window(id - 100),
+                45..=47 => {
+                    let bg = [BG_OFF, BG_GAMES, BG_ALWAYS][id - 45];
+                    if bg != self.cfg.bg {
+                        self.cfg.bg = bg;
+                        self.save_cfg();
+                        self.notify(
+                            match bg {
+                                BG_OFF => "Clips en segundo plano apagados: no se graba nada hasta que apretes grabar.",
+                                BG_GAMES => "Los clips se graban solo mientras hay un juego en pantalla completa.",
+                                _ => "Los clips se graban siempre.",
+                            },
+                            false,
+                        );
+                        self.restart_rec();
                     }
-                    self.restart_rec();
                 }
                 43 => {
                     self.cfg.mic = !self.cfg.mic;
@@ -1303,6 +1687,7 @@ mod app {
                 }
                 30 => self.start_bind(1),
                 31 => self.start_bind(2),
+                32 => self.start_bind(3),
                 40 => {
                     if let Some(d) = self.out_dir() {
                         let _ = Command::new("explorer.exe").arg(d).spawn();
@@ -1316,6 +1701,22 @@ mod app {
         }
 
         fn shutdown(&mut self) {
+            // una grabación manual en curso se guarda antes de salir
+            if let Some(mut m) = self.manual.take() {
+                if let Some(mut c) = m.child.take() {
+                    let _ = c.kill();
+                    let _ = c.wait();
+                }
+                if let Some(dir) = self.out_dir() {
+                    let out = dir.join(format!("grabacion_{}.mp4", now_stamp()));
+                    let args = logic::remux_args(&m.ts.to_string_lossy(), &out.to_string_lossy());
+                    let mut cmd = Command::new(&self.ffmpeg);
+                    cmd.args(&args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(log_stdio(&self.log_path));
+                    if spawn_hidden(&mut cmd, 0).and_then(|mut c| c.wait()).is_ok_and(|s| s.success()) {
+                        let _ = fs::remove_file(&m.ts);
+                    }
+                }
+            }
             self.stop_rec();
             self.clear_buf();
             unsafe {
@@ -1431,6 +1832,7 @@ mod app {
                 with_app(|a| match wp.0 {
                     1 => a.save_clip(),
                     2 => a.screenshot(),
+                    3 => a.toggle_manual_screen(),
                     _ => {}
                 });
                 LRESULT(0)
@@ -1524,6 +1926,8 @@ mod app {
 
     pub fn run() {
         unsafe {
+            // píxeles reales (ventanas, pantalla e ícono bien medidos con escalado de Windows al 125/150 %)
+            let _ = windows::Win32::UI::HiDpi::SetProcessDpiAwarenessContext(windows::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
             let _mutex = CreateMutexW(None, true, w!("Local\\jugadon_single_instance"));
             if GetLastError() == ERROR_ALREADY_EXISTS {
                 message_box("Jugadón ya está abierto (mirá la bandeja del sistema, al lado del reloj).");
@@ -1581,6 +1985,10 @@ mod app {
                 log_path,
                 icon_on: load_icon(hinst.into(), 1),
                 icon_off: load_icon(hinst.into(), 2),
+                icon_rec: make_icon(),
+                manual: None,
+                rec_dir: temp.join("jugadon_rec"),
+                menu_windows: Vec::new(),
                 rec: Rec {
                     child: None,
                     enc,
@@ -1603,6 +2011,7 @@ mod app {
             with_app(|a| {
                 a.add_icon();
                 a.register_keys();
+                a.recover_recordings();
                 a.tick(); // arranca a grabar ya si no está en "solo juegos" o si ya hay un juego abierto
             });
             SetTimer(Some(hwnd), TIMER_WATCHDOG, 2000, None);

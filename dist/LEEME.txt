@@ -5,16 +5,22 @@ Jugadón - guardá tus jugadas con una tecla
 2. Abrí jugadon.exe. Aparece el ícono de Jugadón en la bandeja, al lado
    del reloj. Si no lo ves, tocá la flechita ^.
      gris    = en pausa (no hay ningún juego abierto, no consume nada)
-     naranja = grabando
+     naranja = clips en segundo plano activos
+     rojo    = grabando con F8 (grabación de principio a fin)
    Si SmartScreen avisa: "Más información" -> "Ejecutar de todas formas"
    (el exe no está firmado).
 
 Teclas por defecto:
   F9   guarda los últimos 30 segundos como clip (.mp4)
   F10  saca una captura de pantalla (.png)
+  F8   empieza a grabar la pantalla completa / la frena y la guarda
 
-Graba solo mientras hay un juego en pantalla completa (o ventana sin bordes).
-Para que grabe siempre: menú -> Opciones -> Grabar solo en juegos.
+Clips en segundo plano (F9): por defecto solo mientras hay un juego en
+pantalla completa (o ventana sin bordes). Se cambia en el menú ->
+"Clips en segundo plano": Solo mientras juego / Siempre / Apagado.
+
+Para grabar una sola ventana (el juego, el navegador, lo que sea):
+menú -> "Grabar una ventana" y la elegís. F8 la frena y la guarda.
 
 Los archivos van a: %USERPROFILE%\Videos\Jugadon
 Al guardar suena un "tin-tin" y aparece un aviso: tocalo para ver el clip.
@@ -33,4 +39,4 @@ Graba la pantalla principal, el sonido del sistema y (opcional) el micrófono.
 Si algo no anda, mirá %TEMP%\jugadon.log
 Configuración: %APPDATA%\Jugadon\config.ini
 
-Más info: https://github.com/bautistacasero265-maker/app-clips
+Más info: https://github.com/bautistacasero265-maker/jugadon
