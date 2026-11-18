@@ -68,11 +68,17 @@ jobs:
           foreach ($f in 'ddagrab', 'gfxcapture', 'scale_d3d11', 'hwmap', 'hwdownload', 'select', 'scale') {
             if ($filters -notmatch "\s$f\s") { $missing += "filtro $f" }
           }
-          foreach ($e in 'h264_nvenc', 'h264_amf', 'h264_qsv', 'libx264', 'aac') {
+          foreach ($e in 'h264_nvenc', 'h264_amf', 'h264_qsv', 'h264_mf', 'libx264', 'aac') {
             if ($encoders -notmatch "\s$e\s") { $missing += "encoder $e" }
           }
           if ($missing.Count -gt 0) { throw "Faltan en FFmpeg: $($missing -join ', ')" }
-          Write-Host "OK: ddagrab, gfxcapture, scale_d3d11, h264_nvenc, h264_amf, h264_qsv, libx264"
+          Write-Host "OK: ddagrab, gfxcapture, scale_d3d11, h264_nvenc, h264_amf, h264_qsv, h264_mf, libx264"
+          Write-Host "----- h264_mf (Media Foundation, informativo: el servidor no tiene placa) -----"
+          & $ff -hide_banner -loglevel warning -f lavfi -i testsrc2=size=1280x720:rate=30 -t 2 -vf format=nv12 -c:v h264_mf -rate_control cbr -scenario display_remoting -b:v 6000k -g 60 -bf 0 -y mf_test.mp4
+          Write-Host "h264_mf por software: código $LASTEXITCODE, $((Get-Item mf_test.mp4 -ErrorAction SilentlyContinue).Length) bytes"
+          & $ff -hide_banner -loglevel warning -f lavfi -i testsrc2=size=1280x720:rate=30 -t 1 -vf format=nv12 -c:v h264_mf -hw_encoding 1 -f null -
+          Write-Host "h264_mf por hardware (sin placa se espera que falle): código $LASTEXITCODE"
+          $global:LASTEXITCODE = 0
           Write-Host "----- ffmpeg -h filter=gfxcapture -----"
           & $ff -hide_banner -h filter=gfxcapture
           Write-Host "----- ffmpeg -h filter=scale_d3d11 -----"

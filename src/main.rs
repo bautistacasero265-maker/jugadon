@@ -56,14 +56,17 @@ mod logic {
                 rec: Hotkey { vk: VK_F8, mods: 0 },
                 mic: true,
                 sound: true,
-                gpu_only: true,
+                gpu_only: false,
             }
         }
 
         pub fn parse(text: &str, default_folder: String) -> Self {
             let mut c = Self::defaults(default_folder);
             // configs anteriores a la versión 2 tenían el micrófono apagado por defecto: se ignora ese valor
-            let v2 = text.lines().any(|l| l.trim() == "version=2");
+            let ver = text.lines().find_map(|l| l.trim().strip_prefix("version=")?.parse::<u32>().ok()).unwrap_or(0);
+            let v2 = ver >= 2;
+            // antes de la versión 3 "solo placa" venía prendido y la lista de encoders era otra
+            let v3 = ver >= 3;
             for line in text.lines() {
                 let Some((k, v)) = line.split_once('=') else { continue };
                 let (k, v) = (k.trim(), v.trim());
@@ -77,7 +80,7 @@ mod logic {
                     ("clip_mods", Some(n)) => c.clip.mods = n & 7,
                     ("shot_key", Some(n)) if (1..=254).contains(&n) => c.shot.vk = n,
                     ("shot_mods", Some(n)) => c.shot.mods = n & 7,
-                    ("encoder", Some(n)) if (n as usize) < ENCODERS.len() => c.encoder = n as usize,
+                    ("encoder", Some(n)) if v3 && (n as usize) < ENCODERS.len() => c.encoder = n as usize,
                     ("folder", _) if !v.is_empty() => c.folder = v.to_string(),
                     ("bg", Some(n)) if n <= BG_ALWAYS => c.bg = n,
                     ("only_games", Some(0)) => c.bg = BG_ALWAYS, // config de la versión 0.3
@@ -85,7 +88,7 @@ mod logic {
                     ("rec_mods", Some(n)) => c.rec.mods = n & 7,
                     ("mic", Some(n)) if n <= 1 && v2 => c.mic = n == 1,
                     ("sound", Some(n)) if n <= 1 => c.sound = n == 1,
-                    ("gpu_only", Some(n)) if n <= 1 => c.gpu_only = n == 1,
+                    ("gpu_only", Some(n)) if n <= 1 && v3 => c.gpu_only = n == 1,
                     _ => {}
                 }
             }
@@ -99,7 +102,7 @@ mod logic {
 
         pub fn serialize(&self) -> String {
             format!(
-                "version=2\nseconds={}\nfps={}\nquality={}\nclip_key={}\nclip_mods={}\nshot_key={}\nshot_mods={}\nfolder={}\nencoder={}\nbg={}\nrec_key={}\nrec_mods={}\nmic={}\nsound={}\ngpu_only={}\n",
+                "version=3\nseconds={}\nfps={}\nquality={}\nclip_key={}\nclip_mods={}\nshot_key={}\nshot_mods={}\nfolder={}\nencoder={}\nbg={}\nrec_key={}\nrec_mods={}\nmic={}\nsound={}\ngpu_only={}\n",
                 self.secs,
                 self.fps,
                 self.height,
@@ -173,6 +176,10 @@ mod logic {
     const NV: &[&str] = &["-preset", "p1", "-tune", "ll", "-rc", "cbr"];
     const AMF: &[&str] = &["-usage", "lowlatency", "-quality", "speed", "-rc", "cbr"];
     const QSV: &[&str] = &["-preset", "veryfast"];
+    // Media Foundation: el compresor de la placa a través de Windows. Lo trae el driver de
+    // cualquier marca desde hace años, así que anda aunque NVENC/AMF/QSV de FFmpeg pidan un
+    // driver más nuevo o falte su runtime.
+    const MF: &[&str] = &["-hw_encoding", "1", "-rate_control", "cbr", "-scenario", "display_remoting"];
     // x264 (sin placa que codifique): el preset más liviano y solo 2 hilos, para dejarle CPU al juego
     // los hilos se agregan según la resolución (1 hilo a 480p, 2 a 720p)
     const X264: &[&str] = &["-preset", "ultrafast", "-tune", "zerolatency"];
@@ -182,7 +189,7 @@ mod logic {
 
     /// Orden de prueba: todo en GPU primero, después escalado en CPU, último x264.
     /// ("720" en vf se reemplaza por el alto elegido.)
-    pub const ENCODERS: [Enc; 9] = [
+    pub const ENCODERS: [Enc; 13] = [
         Enc { gdi: false, label: "NVENC", vf: GPU, codec: "h264_nvenc", opts: NV },
         Enc { gdi: false, label: "AMF", vf: GPU, codec: "h264_amf", opts: AMF },
         Enc {
@@ -195,6 +202,18 @@ mod logic {
         Enc { gdi: false, label: "NVENC (escala CPU)", vf: CPU, codec: "h264_nvenc", opts: NV },
         Enc { gdi: false, label: "AMF (escala CPU)", vf: CPU, codec: "h264_amf", opts: AMF },
         Enc { gdi: false, label: "QSV (escala CPU)", vf: CPU, codec: "h264_qsv", opts: QSV },
+        // placa vía Windows: sirve con drivers viejos o sin runtime de AMF/QSV
+        Enc { gdi: false, label: "Placa vía Windows", vf: GPU, codec: "h264_mf", opts: MF },
+        Enc {
+            gdi: false,
+            label: "Placa vía Windows (copia)",
+            vf: "scale_d3d11=width=-2:height=min(720\\,trunc(ih/2)*2):format=nv12,hwdownload,format=nv12",
+            codec: "h264_mf",
+            opts: MF,
+        },
+        Enc { gdi: false, label: "Placa vía Windows (escala CPU)", vf: CPU, codec: "h264_mf", opts: MF },
+        // captura por GDI (drivers sin Desktop Duplication) pero comprimiendo con la placa
+        Enc { gdi: true, label: "Placa vía Windows (captura GDI)", vf: "scale=-2:min(720\\,trunc(ih/2)*2):flags=fast_bilinear,format=nv12", codec: "h264_mf", opts: MF },
         // la placa escala (barato) y la CPU solo comprime un video chico
         Enc { gdi: false, label: "x264 (escala GPU)", vf: "scale_d3d11=width=-2:height=min(720\\,trunc(ih/2)*2):format=nv12,hwdownload,format=nv12", codec: "libx264", opts: X264 },
         Enc { gdi: false, label: "x264 (CPU)", vf: CPU, codec: "libx264", opts: X264 },
@@ -290,7 +309,12 @@ mod logic {
         }
         if e.gdi {
             a.extend(["-f".into(), "gdigrab".into(), "-framerate".into(), fps.to_string(), "-draw_mouse".into(), "1".into()]);
-            a.extend(s(&["-i", "desktop"]));
+            a.push("-i".into());
+            // una ventana se pide por su handle: nunca se graba el escritorio entero en su lugar
+            a.push(match src {
+                Source::Screen => "desktop".into(),
+                Source::Window(h) => format!("hwnd={h}"),
+            });
         } else {
             a.extend(s(&["-f", "lavfi", "-i"]));
             a.push(match src {
@@ -547,8 +571,13 @@ mod logic {
         #[test]
         fn new_options_default_and_parse() {
             let d = Config::defaults("F".into());
-            assert!(d.gpu_only);
-            assert!(!Config::parse("gpu_only=0\n", "F".into()).gpu_only);
+            assert!(!d.gpu_only);
+            assert!(Config::parse("version=3\ngpu_only=1\n", "F".into()).gpu_only);
+            // config vieja con solo placa y encoder guardado: vuelve a los valores nuevos
+            let c = Config::parse("version=2\ngpu_only=1\nencoder=7\n", "F".into());
+            assert!(!c.gpu_only && c.encoder == 0);
+            let c = Config::parse(&Config { encoder: 9, gpu_only: true, ..Config::defaults("F".into()) }.serialize(), "F".into());
+            assert!(c.gpu_only && c.encoder == 9);
             assert!(d.bg == BG_GAMES && d.mic && d.sound && d.rec.vk == VK_F8);
             let c = Config::parse("version=2\nbg=0\nmic=0\nsound=0\n", "F".into());
             assert!(c.bg == BG_OFF && !c.mic && !c.sound);
@@ -573,8 +602,9 @@ mod logic {
                 (e, t) = (ne, nt);
             }
             assert!(seen.iter().all(|&i| ENCODERS[i].codec != "libx264"), "{seen:?}");
-            assert_eq!(seen.len(), 6);
-            // sin restricción: prueba los 9
+            assert_eq!(seen.len(), 10);
+            assert!(seen.iter().any(|&i| ENCODERS[i].codec == "h264_mf" && ENCODERS[i].gdi));
+            // sin restricción: prueba todos
             let mut n = 1;
             let (mut e, mut t) = (0, 0);
             while let Some((ne, nt)) = next_encoder(e, t, false) {
@@ -583,9 +613,12 @@ mod logic {
             }
             assert_eq!(n, ENCODERS.len());
             // arrancando de uno guardado en el medio, da la vuelta
-            assert_eq!(next_encoder(5, 0, true), Some((0, 4)));
-            assert_eq!(first_encoder(7, true), 0);
-            assert_eq!(first_encoder(7, false), 7);
+            assert_eq!(next_encoder(9, 0, true), Some((0, 4)));
+            assert_eq!(first_encoder(10, true), 0);
+            assert_eq!(first_encoder(10, false), 10);
+            // los de procesador van al final: primero se prueba toda forma de usar la placa
+            let first_cpu = ENCODERS.iter().position(|e| e.codec == "libx264").unwrap();
+            assert!(ENCODERS[first_cpu..].iter().all(|e| e.codec == "libx264"));
             assert_eq!(first_encoder(2, true), 2);
         }
 
@@ -678,13 +711,13 @@ mod logic {
 
         #[test]
         fn record_args_cpu_no_audio() {
-            let a = record_args(7, 720, 30, Source::Screen, None, Out::Segments { secs: 60, dir: "D" }).join(" ");
+            let a = record_args(11, 720, 30, Source::Screen, None, Out::Segments { secs: 60, dir: "D" }).join(" ");
             assert!(a.contains("-nostdin"));
             // x264 en CPU: 720p si se pide, máximo 30 fps, 2 hilos
             assert!(a.contains("-map 0:v -vf hwdownload,format=bgra,scale=-2:min(720\\,trunc(ih/2)*2)"));
             assert!(a.contains("-c:v libx264 -preset ultrafast -tune zerolatency -threads 2"));
             // automático con procesador: 480p, 1 hilo
-            let a = record_args(7, 0, 30, Source::Screen, None, Out::File("x")).join(" ");
+            let a = record_args(11, 0, 30, Source::Screen, None, Out::File("x")).join(" ");
             assert!(a.contains("scale=-2:min(480") && a.contains("-threads 1") && a.contains("-b:v 2500k"));
             // automático con placa: 720p
             let a = record_args(0, 0, 30, Source::Screen, None, Out::File("x")).join(" ");
@@ -694,13 +727,19 @@ mod logic {
             assert_eq!(Config::parse("quality=720\n", "F".into()).height, 720);
             assert!(a.contains("-b:v 6000k"));
             assert!(a.contains("-g 60"));
-            let a = record_args(6, 720, 60, Source::Screen, None, Out::File("x")).join(" ");
+            let a = record_args(10, 720, 60, Source::Screen, None, Out::File("x")).join(" ");
             assert!(a.contains("ddagrab=framerate=30:"));
             assert!(a.contains("scale_d3d11=width=-2:height=min(720\\,trunc(ih/2)*2):format=nv12,hwdownload,format=nv12"));
             // GDI: otra entrada, sin lavfi
-            let a = record_args(8, 720, 30, Source::Screen, None, Out::File("x")).join(" ");
+            let a = record_args(12, 720, 30, Source::Screen, None, Out::File("x")).join(" ");
             assert!(a.contains("-f gdigrab -framerate 30 -draw_mouse 1 -i desktop -map 0:v -vf scale=-2:min(720"));
             assert!(!a.contains("lavfi"));
+            // GDI con una ventana: se pide esa ventana por su handle, nunca el escritorio
+            let a = record_args(12, 720, 30, Source::Window(1234), None, Out::File("x")).join(" ");
+            assert!(a.contains("-i hwnd=1234 ") && !a.contains("desktop"));
+            // placa vía Windows (Media Foundation): sin copia, por hardware, CBR
+            let a = record_args(6, 0, 30, Source::Screen, None, Out::File("x")).join(" ");
+            assert!(a.contains("format=nv12 -c:v h264_mf -hw_encoding 1 -rate_control cbr") && a.contains("-b:v 6000k"));
             // 480p elegido por el usuario, con encoder de placa
             let a = record_args(0, 480, 30, Source::Screen, None, Out::File("x")).join(" ");
             assert!(a.contains("height=min(480") && a.contains("-b:v 2500k") && a.contains("h264_nvenc"));
@@ -766,7 +805,7 @@ mod win_tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let dirs = dir.to_string_lossy().into_owned();
-        let mut args = logic::record_args(7, 720, 30, logic::Source::Screen, Some((48000, 2)), logic::Out::Segments { secs: 6, dir: &dirs });
+        let mut args = logic::record_args(11, 720, 30, logic::Source::Screen, Some((48000, 2)), logic::Out::Segments { secs: 6, dir: &dirs });
         for a in args.iter_mut() {
             if a.starts_with("ddagrab=") {
                 *a = "testsrc2=size=1920x1080:rate=30,realtime".into();
@@ -847,7 +886,7 @@ mod win_tests_manual {
         let tmp = std::env::temp_dir();
         let ts = tmp.join("jugadon_test_rec.ts").to_string_lossy().into_owned();
         let mp4 = tmp.join("jugadon_test_rec.mp4").to_string_lossy().into_owned();
-        let mut args = logic::record_args(7, 720, 30, logic::Source::Window(0), None, logic::Out::File(&ts));
+        let mut args = logic::record_args(11, 720, 30, logic::Source::Window(0), None, logic::Out::File(&ts));
         for a in args.iter_mut() {
             if a.starts_with("gfxcapture=") {
                 *a = "testsrc2=size=800x601:rate=30,realtime".into(); // alto impar a propósito
@@ -898,7 +937,7 @@ mod win_tests_gdi {
     #[test]
     fn gdi_screen_capture_720p30() {
         let Ok(ff) = std::env::var("RCLIP_FFMPEG") else { return };
-        let gdi = logic::ENCODERS.iter().position(|e| e.gdi).unwrap();
+        let gdi = logic::ENCODERS.iter().position(|e| e.gdi && e.codec == "libx264").unwrap();
         let ts = std::env::temp_dir().join("jugadon_test_gdi.ts").to_string_lossy().into_owned();
         let args = logic::record_args(gdi, 720, 30, logic::Source::Screen, None, logic::Out::File(&ts));
         let mut child = Command::new(&ff).args(&args).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
@@ -1574,7 +1613,7 @@ mod app {
             if len == 0 {
                 let _ = fs::remove_file(&m.ts);
                 let hint = ffmpeg_hint(&self.log_path);
-                let gpu = if self.cfg.gpu_only { " Si tu placa no puede, desactivá Opciones → Usar solo la placa de video." } else { "" };
+                let gpu = if self.cfg.gpu_only { " Si tu placa no puede, desmarcá Opciones → Nunca usar el procesador." } else { "" };
                 self.notify(&format!("No se pudo grabar.{hint}{gpu}"), true);
                 return;
             }
@@ -1743,7 +1782,7 @@ mod app {
                             log_line(&self.log_path, "ningún encoder funcionó");
                             if self.cfg.gpu_only {
                                 let hint = ffmpeg_hint(&self.log_path);
-                                self.notify(&format!("La placa de video no pudo grabar.{hint} Para grabar igual con el procesador: Opciones → desmarcá \"Usar solo la placa de video\"."), true);
+                                self.notify(&format!("La placa de video no pudo grabar.{hint} Para grabar igual con el procesador: Opciones → desmarcá \"Nunca usar el procesador\"."), true);
                             } else {
                                 let hint = ffmpeg_hint(&self.log_path);
                                 self.notify(&format!("No pude iniciar la grabación.{hint}"), true);
@@ -1995,7 +2034,7 @@ mod app {
                 let o = CreatePopupMenu().unwrap_or_default();
                 add(o, 43, "Grabar micrófono", self.cfg.mic);
                 add(o, 44, "Sonido al guardar", self.cfg.sound);
-                add(o, 48, "Usar solo la placa de video (nunca el procesador)", self.cfg.gpu_only);
+                add(o, 48, "Nunca usar el procesador (si la placa no puede, no graba)", self.cfg.gpu_only);
                 sep(o);
                 add(o, 30, "Tecla de clip…", false);
                 add(o, 31, "Tecla de captura…", false);
@@ -2048,7 +2087,7 @@ mod app {
                         if self.cfg.gpu_only {
                             "Solo placa de video: si tu placa no puede comprimir, no graba (el juego no pierde nada)."
                         } else {
-                            "Si la placa no puede, se usa el procesador (puede bajar algo de FPS en PCs lentas)."
+                            "Siempre se prueba primero la placa; el procesador solo si ninguna forma de usar la placa anda (480p, prioridad baja)."
                         },
                         false,
                     );
