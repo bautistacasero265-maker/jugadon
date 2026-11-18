@@ -1,4 +1,5 @@
-# Genera assets/jugadon.ico (ícono del exe y de la bandeja) y assets/banner.png (README).
+# Genera assets/jugadon.ico (exe y bandeja grabando), assets/jugadon_pausa.ico (bandeja en pausa)
+# y assets/banner.png (README).
 # Uso: python3 assets/make_assets.py   (requiere Pillow)
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 import os
@@ -15,14 +16,17 @@ def gradient(size, c1, c2):
     return g.resize((size, size))
 
 
-def icon(size):
+GREY_TOP, GREY_BOTTOM = (120, 120, 135), (80, 80, 95)  # versión "en pausa"
+
+
+def icon(size, top=TOP, bottom=BOTTOM):
     s = size * 4  # supersampling
     img = Image.new("RGBA", (s, s), (0, 0, 0, 0))
     mask = Image.new("L", (s, s), 0)
     small = size <= 24
     pad = 0 if small else int(s * 0.04)
     ImageDraw.Draw(mask).rounded_rectangle([pad, pad, s - pad - 1, s - pad - 1], radius=int(s * 0.24), fill=255)
-    img.paste(gradient(s, TOP, BOTTOM), (0, 0), mask)
+    img.paste(gradient(s, top, bottom), (0, 0), mask)
     d = ImageDraw.Draw(img)
     # triángulo de play blanco, apenas corrido a la derecha para que se vea centrado
     w = s * (0.50 if small else 0.44)
@@ -45,6 +49,8 @@ sizes = [16, 20, 24, 32, 40, 48, 64, 128, 256]
 imgs = [icon(n) for n in sizes]
 imgs[-1].save(os.path.join(HERE, "jugadon.ico"), sizes=[(n, n) for n in sizes], append_images=imgs[:-1])
 icon(512).save(os.path.join(HERE, "icon.png"))
+grey = [icon(n, GREY_TOP, GREY_BOTTOM) for n in sizes]
+grey[-1].save(os.path.join(HERE, "jugadon_pausa.ico"), sizes=[(n, n) for n in sizes], append_images=grey[:-1])
 
 # Banner del README
 W, H = 1280, 400

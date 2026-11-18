@@ -111,6 +111,24 @@ jobs:
           Get-ChildItem Jugadon | Format-Table Name, Length
           Write-Host ("zip: {0:N0} bytes" -f (Get-Item Jugadon-windows-x64.zip).Length)
 
+      - name: Medir RAM de jugadon.exe en reposo (sin juego abierto)
+        run: |
+          $p = Start-Process -FilePath Jugadon\jugadon.exe -WorkingDirectory Jugadon -PassThru
+          Start-Sleep -Seconds 25
+          if ($p.HasExited) { throw "jugadon.exe se cerró solo (código $($p.ExitCode))" }
+          $p.Refresh()
+          $priv = (Get-Counter "\Process(jugadon)\Working Set - Private").CounterSamples[0].CookedValue
+          $cpu = $p.TotalProcessorTime.TotalMilliseconds
+          $ff = @(Get-Process ffmpeg -ErrorAction SilentlyContinue)
+          Write-Host ("RAM privada (lo que muestra el Administrador de tareas): {0:N0} KB" -f ($priv / 1KB))
+          Write-Host ("Working set total (incluye DLLs compartidas de Windows): {0:N0} KB" -f ($p.WorkingSet64 / 1KB))
+          Write-Host ("Memoria privada comprometida: {0:N0} KB" -f ($p.PrivateMemorySize64 / 1KB))
+          Write-Host ("CPU usada en 25 s: {0:N0} ms" -f $cpu)
+          Write-Host ("Procesos ffmpeg corriendo: {0}" -f $ff.Count)
+          Stop-Process -Id $p.Id -Force
+          if ($ff.Count -gt 0) { throw "En reposo no debería correr ffmpeg" }
+          if ($priv -gt 4MB) { Write-Host "::warning::RAM privada en reposo por encima de 4 MB" }
+
       - uses: actions/upload-artifact@v4
         with:
           name: Jugadon-windows-x64
@@ -119,14 +137,15 @@ jobs:
       - name: Publicar release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.2.${{ github.run_number }}
-          name: Jugadón v0.2.${{ github.run_number }}
+          tag_name: v0.3.${{ github.run_number }}
+          name: Jugadón v0.3.${{ github.run_number }}
           target_commitish: ${{ github.sha }}
           prerelease: ${{ github.ref_name != github.event.repository.default_branch }}
           files: Jugadon-windows-x64.zip
           body: |
             Bajá **Jugadon-windows-x64.zip**, descomprimilo en una carpeta y abrí `jugadon.exe`.
-            Aparece el ícono de Jugadón (play naranja) en la bandeja, al lado del reloj. **F9** guarda el clip, **F10** saca captura.
+            Aparece el ícono de Jugadón en la bandeja, al lado del reloj: **gris** = en pausa (sin juego), **naranja** = grabando.
+            **F9** guarda el clip, **F10** saca captura.
             Instrucciones completas en el README del repo y en LEEME.txt dentro del zip.
 
             Compilado desde el commit ${{ github.sha }} (rama `${{ github.ref_name }}`).

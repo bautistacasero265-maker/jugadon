@@ -2,8 +2,10 @@ Jugadón - guardá tus jugadas con una tecla
 ==========================================
 
 1. Dejá jugadon.exe y ffmpeg.exe juntos en la misma carpeta.
-2. Abrí jugadon.exe. Aparece el ícono de Jugadón (play naranja) en la
-   bandeja, al lado del reloj. Si no lo ves, tocá la flechita ^.
+2. Abrí jugadon.exe. Aparece el ícono de Jugadón en la bandeja, al lado
+   del reloj. Si no lo ves, tocá la flechita ^.
+     gris    = en pausa (no hay ningún juego abierto, no consume nada)
+     naranja = grabando
    Si SmartScreen avisa: "Más información" -> "Ejecutar de todas formas"
    (el exe no está firmado).
 
@@ -11,17 +13,23 @@ Teclas por defecto:
   F9   guarda los últimos 30 segundos como clip (.mp4)
   F10  saca una captura de pantalla (.png)
 
+Graba solo mientras hay un juego en pantalla completa (o ventana sin bordes).
+Para que grabe siempre: menú -> Opciones -> Grabar solo en juegos.
+
 Los archivos van a: %USERPROFILE%\Videos\Jugadon
+Al guardar suena un "tin-tin" y aparece un aviso: tocalo para ver el clip.
+Menú -> "Copiar último clip" y lo pegás con Ctrl+V en Discord o WhatsApp.
 
 Clic en el ícono para abrir el menú. Ahí podés:
   - cambiar la duración (15 s a 5 min)
   - cambiar la calidad (720p 30 o 60 fps)
+  - activar el micrófono o sacar el sonido (Opciones)
   - cambiar las teclas
   - abrir la carpeta
   - hacer que arranque con Windows
   - salir
 
-Graba la pantalla principal y el sonido del sistema. No graba el micrófono.
+Graba la pantalla principal, el sonido del sistema y (opcional) el micrófono.
 Si algo no anda, mirá %TEMP%\jugadon.log
 Configuración: %APPDATA%\Jugadon\config.ini
 
