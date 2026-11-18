@@ -103,9 +103,10 @@ function Clipboard-Files {
   powershell.exe -NoProfile -Sta -Command "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.Clipboard]::GetFileDropList() -join '|'"
 }
 
-# configuración: clips siempre (en el servidor no hay juegos), 15 s, carpeta propia
+# configuración: clips siempre (en el servidor no hay juegos), 15 s, carpeta propia.
+# Estos servidores no tienen placa de video: se permite el procesador (gpu_only=0) para poder probar todo lo demás.
 @"
-version=3
+version=4
 seconds=15
 fps=30
 quality=0

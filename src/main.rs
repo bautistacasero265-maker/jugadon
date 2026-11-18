@@ -58,7 +58,7 @@ mod logic {
                 rec: Hotkey { vk: VK_F8, mods: 0 },
                 mic: true,
                 sound: true,
-                gpu_only: false,
+                gpu_only: true,
                 probed: String::new(),
             }
         }
@@ -70,6 +70,8 @@ mod logic {
             let v2 = ver >= 2;
             // antes de la versión 3 "solo placa" venía prendido y la lista de encoders era otra
             let v3 = ver >= 3;
+            // versión 4: "solo placa" vuelve a venir activado (el procesador solo si el usuario lo permite)
+            let v4 = ver >= 4;
             for line in text.lines() {
                 let Some((k, v)) = line.split_once('=') else { continue };
                 let (k, v) = (k.trim(), v.trim());
@@ -91,8 +93,8 @@ mod logic {
                     ("rec_mods", Some(n)) => c.rec.mods = n & 7,
                     ("mic", Some(n)) if n <= 1 && v2 => c.mic = n == 1,
                     ("sound", Some(n)) if n <= 1 => c.sound = n == 1,
-                    ("gpu_only", Some(n)) if n <= 1 && v3 => c.gpu_only = n == 1,
-                    ("probed", _) if v3 => c.probed = v.to_string(),
+                    ("gpu_only", Some(n)) if n <= 1 && v4 => c.gpu_only = n == 1,
+                    ("probed", _) if v4 => c.probed = v.to_string(),
                     _ => {}
                 }
             }
@@ -106,7 +108,7 @@ mod logic {
 
         pub fn serialize(&self) -> String {
             format!(
-                "version=3\nseconds={}\nfps={}\nquality={}\nclip_key={}\nclip_mods={}\nshot_key={}\nshot_mods={}\nfolder={}\nencoder={}\nbg={}\nrec_key={}\nrec_mods={}\nmic={}\nsound={}\ngpu_only={}\nprobed={}\n",
+                "version=4\nseconds={}\nfps={}\nquality={}\nclip_key={}\nclip_mods={}\nshot_key={}\nshot_mods={}\nfolder={}\nencoder={}\nbg={}\nrec_key={}\nrec_mods={}\nmic={}\nsound={}\ngpu_only={}\nprobed={}\n",
                 self.secs,
                 self.fps,
                 self.height,
@@ -601,13 +603,15 @@ mod logic {
         #[test]
         fn new_options_default_and_parse() {
             let d = Config::defaults("F".into());
-            assert!(!d.gpu_only);
-            assert!(Config::parse("version=3\ngpu_only=1\n", "F".into()).gpu_only);
+            assert!(d.gpu_only);
+            assert!(!Config::parse("version=4\ngpu_only=0\n", "F".into()).gpu_only);
+            // config de la versión 3 (procesador permitido por defecto): vuelve a solo placa
+            assert!(Config::parse("version=3\ngpu_only=0\n", "F".into()).gpu_only);
             // config vieja con solo placa y encoder guardado: vuelve a los valores nuevos
-            let c = Config::parse("version=2\ngpu_only=1\nencoder=7\n", "F".into());
-            assert!(!c.gpu_only && c.encoder == 0);
-            let c = Config::parse(&Config { encoder: 9, gpu_only: true, ..Config::defaults("F".into()) }.serialize(), "F".into());
-            assert!(c.gpu_only && c.encoder == 9);
+            let c = Config::parse("version=2\ngpu_only=0\nencoder=7\n", "F".into());
+            assert!(c.gpu_only && c.encoder == 0);
+            let c = Config::parse(&Config { encoder: 9, gpu_only: false, ..Config::defaults("F".into()) }.serialize(), "F".into());
+            assert!(!c.gpu_only && c.encoder == 9);
             let c = Config::parse(&Config { probed: "41".into(), ..Config::defaults("F".into()) }.serialize(), "F".into());
             assert_eq!(c.probed, "41");
             assert!(Config::parse("version=2\nprobed=41\n", "F".into()).probed.is_empty());
@@ -1655,7 +1659,7 @@ mod app {
             if len == 0 {
                 let _ = fs::remove_file(&m.ts);
                 let hint = ffmpeg_hint(&self.log_path);
-                let gpu = if self.cfg.gpu_only { " Si tu placa no puede, desmarcá Opciones → Nunca usar el procesador." } else { "" };
+                let gpu = if self.cfg.gpu_only { " Si tu placa no puede, actualizá su driver o activá Opciones → Permitir grabar con el procesador." } else { "" };
                 self.notify(&format!("No se pudo grabar.{hint}{gpu}"), true);
                 return;
             }
@@ -1762,7 +1766,7 @@ mod app {
             if enc >= ENCODERS.len() {
                 log_line(&self.log_path, "prueba de grabación: ninguna forma anduvo");
                 let hint = ffmpeg_hint(&self.log_path);
-                let gpu = if self.cfg.gpu_only { " Probá desmarcar Opciones → Nunca usar el procesador." } else { "" };
+                let gpu = if self.cfg.gpu_only { " Actualizá el driver de la placa, o activá Opciones → Permitir grabar con el procesador." } else { "" };
                 self.notify(&format!("No encontré cómo grabar video en esta PC.{hint}{gpu}"), true);
                 return;
             }
@@ -1926,7 +1930,7 @@ mod app {
                             log_line(&self.log_path, "ningún encoder funcionó");
                             if self.cfg.gpu_only {
                                 let hint = ffmpeg_hint(&self.log_path);
-                                self.notify(&format!("La placa de video no pudo grabar.{hint} Para grabar igual con el procesador: Opciones → desmarcá \"Nunca usar el procesador\"."), true);
+                                self.notify(&format!("La placa de video no pudo grabar.{hint} Para grabar igual con el procesador: Opciones → \"Permitir grabar con el procesador\"."), true);
                             } else {
                                 let hint = ffmpeg_hint(&self.log_path);
                                 self.notify(&format!("No pude iniciar la grabación.{hint}"), true);
@@ -2179,7 +2183,7 @@ mod app {
                 let o = CreatePopupMenu().unwrap_or_default();
                 add(o, 43, "Grabar micrófono", self.cfg.mic);
                 add(o, 44, "Sonido al guardar", self.cfg.sound);
-                add(o, 48, "Nunca usar el procesador (si la placa no puede, no graba)", self.cfg.gpu_only);
+                add(o, 48, "Permitir grabar con el procesador si la placa no puede", !self.cfg.gpu_only);
                 sep(o);
                 add(o, 30, "Tecla de clip…", false);
                 add(o, 31, "Tecla de captura…", false);
@@ -2229,16 +2233,23 @@ mod app {
                 }
                 48 => {
                     self.cfg.gpu_only = !self.cfg.gpu_only;
+                    if self.cfg.gpu_only && !logic::allowed(self.cfg.encoder, true) {
+                        // lo elegido era el procesador: buscar de nuevo una forma con la placa
+                        self.cfg.probed.clear();
+                    }
                     self.save_cfg();
                     self.notify(
                         if self.cfg.gpu_only {
-                            "Solo placa de video: si tu placa no puede comprimir, no graba (el juego no pierde nada)."
+                            "Solo placa de video: el procesador no se usa nunca para grabar."
                         } else {
-                            "Siempre se prueba primero la placa; el procesador solo si ninguna forma de usar la placa anda (480p, prioridad baja)."
+                            "Primero se prueba siempre la placa; el procesador solo si ninguna forma de usar la placa anda (480p, prioridad baja)."
                         },
                         false,
                     );
                     self.restart_rec();
+                    if self.cfg.probed.is_empty() {
+                        self.start_probe();
+                    }
                 }
                 44 => {
                     self.cfg.sound = !self.cfg.sound;

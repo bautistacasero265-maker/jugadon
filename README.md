@@ -10,7 +10,7 @@
 - 🔊 **Sonido del juego y tu micrófono.**
 - 🗂️ **Ventana "Mis clips"** con miniaturas: abrís, compartís (con el menú Compartir de Windows), copiás para pegar en Discord o WhatsApp, o borrás.
 - ⚡ **El video lo comprime la placa de video** (NVENC, AMF, Quick Sync o, si el driver es viejo, a través de Windows), no el procesador. Sin juego abierto queda en pausa y no consume nada.
-- 🌍 **Anda en cualquier PC con Windows 10 u 11**, con cualquier placa y cualquier driver: si una forma de grabar no funciona, prueba sola la siguiente.
+- 🌍 **Anda con cualquier placa y cualquier driver** en Windows 10 y 11: al abrirla prueba sola qué forma de usar tu placa graba de verdad y se queda con esa.
 - 🔒 **No se conecta a internet** ni manda datos a ningún lado. Tus clips quedan solo en tu PC.
 
 <p align="center"><img src="assets/captura_ventana.png" alt="Ventana Mis clips" width="85%"></p>
@@ -71,7 +71,7 @@ Está dibujada a mano por Jugadón, en Rust, con lo básico de Windows (GDI): si
 - **Calidad ▸**:
   - **Automática** (recomendada): 720p 30 fps si comprime la placa; 480p 30 fps si tiene que usar el procesador.
   - O la elegís: 480p 30 fps (ahorro máximo), 720p 30 fps, 720p 60 fps.
-- **Opciones ▸**: grabar micrófono (activado), sonido al guardar, **nunca usar el procesador** (desactivado), cambiar teclas, iniciar con Windows.
+- **Opciones ▸**: grabar micrófono (activado), sonido al guardar, **permitir grabar con el procesador** (desactivado), cambiar teclas, iniciar con Windows, volver a probar cómo grabar, ver registro.
 - **Abrir carpeta**, **Salir**.
 
 La configuración está en `%APPDATA%\Jugadon\config.ini`. Ahí también se puede cambiar la carpeta de salida (`folder=`).
@@ -80,7 +80,7 @@ La configuración está en `%APPDATA%\Jugadon\config.ini`. Ahí también se pued
 
 - **En reposo no hay nada grabando.** Sin juego abierto, `ffmpeg.exe` ni siquiera corre y Jugadón devuelve su memoria a Windows. Medido en los servidores de GitHub: **108 KB** de RAM y menos de 40 ms de CPU en 25 segundos.
 - **El video lo comprime la placa**, en su chip de video dedicado, aparte de lo que usa el juego para dibujar. La imagen se achica a 720p dentro de la placa y nunca pasa por el procesador.
-- **Siempre prueba primero la placa**, de todas las formas posibles. El procesador se usa solo si ninguna anda, y a 480p con prioridad baja. Si preferís que en ese caso no grabe, activá Opciones → **Nunca usar el procesador**.
+- **Graba solo con la placa de video** (viene así). Prueba todas las formas de usarla: directo (NVENC, AMF, Quick Sync) y a través de Windows (Media Foundation), que viene en los drivers de NVIDIA, AMD e Intel de los últimos 10 años, aunque sean viejos. El procesador **nunca** se usa, salvo que vos actives Opciones → **Permitir grabar con el procesador** (graba a 480p con prioridad baja).
 - **Guardar un clip no recomprime nada.** Los últimos segundos están en el disco en pedazos de 2 s y F9 solo los une en un `.mp4`, con prioridad baja. Por eso no hay tirón al guardar.
 - **El juego siempre tiene prioridad**: la grabación corre con prioridad "debajo de lo normal", y guardar o capturar con prioridad "baja".
 - **Audio liviano**: el modo rápido de AAC. Medido: **1,6 % de un núcleo** para el audio y el guardado de pedazos.
@@ -97,7 +97,7 @@ Lo que define si se nota es **quién comprime el video**. Jugadón prueba solo, 
 | NVIDIA GTX 600 o más nueva (no la GT 710/1030), AMD con VCE/VCN | El chip de video de la placa | No deberías notar bajón de FPS |
 | Gráficos Intel con Quick Sync (el i3-2100 lo trae) | Intel Quick Sync | Bajo impacto |
 | Cualquiera de las anteriores con un driver viejo | La misma placa, a través de Windows (Media Foundation) | Igual de liviano |
-| Ninguna placa que comprima video | El procesador (salvo que actives "Nunca usar el procesador") | 480p 30 fps, un solo hilo, prioridad baja. En 2 núcleos se puede notar algo |
+| Ninguna placa que comprima video | Nadie, salvo que actives "Permitir grabar con el procesador" | 480p 30 fps, un solo hilo, prioridad baja. En 2 núcleos se puede notar algo |
 
 **La primera vez que abrís Jugadón** (y con cada versión nueva) prueba solo, en segundo plano y con prioridad baja, cada forma de grabar durante 3 segundos, y se queda con la primera que de verdad graba video en tu PC. Por eso F8 y F9 andan sea cual sea tu placa o tu driver. Si cambiás de placa o actualizás el driver: menú → Opciones → **Volver a probar cómo grabar**. Si pasás el mouse por el ícono, te dice cuál está usando. Con drivers sin la captura moderna de Windows (por ejemplo Intel HD 2000/3000 en Windows 10), captura por GDI, que funciona en cualquier PC; igual intenta que comprima la placa. Lo que anduvo se recuerda para la próxima vez.
 
@@ -105,7 +105,7 @@ Lo que define si se nota es **quién comprime el video**. Jugadón prueba solo, 
 
 - **"Windows protegió su PC"**: Más información → Ejecutar de todas formas.
 - **El ícono queda gris y F9 no guarda nada**: no detectó un juego en pantalla completa. Poné el juego en "pantalla completa" o "ventana sin bordes", o elegí Clips en segundo plano → **Siempre**.
-- **Dice que la placa no puede comprimir**: solo pasa si activaste Opciones → Nunca usar el procesador. Desactivalo, o actualizá el driver de video.
+- **Dice que la placa no puede comprimir**: actualizá el driver de video y usá menú → Opciones → Volver a probar cómo grabar. Si tu placa no tiene compresor de video, activá Opciones → Permitir grabar con el procesador.
 - **Otro programa usa F9, F8 o F10**: Jugadón avisa; cambiá la tecla desde Opciones.
 - **Un juego en pantalla completa exclusiva sale negro**: ponelo en "ventana sin bordes".
 - **Cualquier otra cosa**: menú → Opciones → **Ver registro (si algo no anda)**. Se abre el registro en el Bloc de notas; copialo y mandalo cuando pidas ayuda.

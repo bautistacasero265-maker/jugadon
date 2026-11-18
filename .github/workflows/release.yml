@@ -135,6 +135,9 @@ jobs:
 
       - name: Medir RAM de jugadon.exe en reposo (sin juego abierto)
         run: |
+          # como en una PC donde ya se hizo la prueba de cómo grabar (si no, esos 3 s de prueba corren al abrir)
+          New-Item -ItemType Directory -Force "$env:APPDATA\Jugadon" | Out-Null
+          "version=4`nprobed=$env:GITHUB_RUN_NUMBER" | Set-Content "$env:APPDATA\Jugadon\config.ini"
           $p = Start-Process -FilePath Jugadon\jugadon.exe -WorkingDirectory Jugadon -PassThru
           Start-Sleep -Seconds 25
           if ($p.HasExited) { throw "jugadon.exe se cerró solo (código $($p.ExitCode))" }
