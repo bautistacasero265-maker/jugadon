@@ -1,0 +1,27 @@
+rclip - clips de juegos desde la bandeja del sistema
+====================================================
+
+1. Dejá rclip.exe y ffmpeg.exe juntos en la misma carpeta.
+2. Abrí rclip.exe. Aparece un punto rojo en la bandeja, al lado del reloj.
+   Si SmartScreen avisa: "Más información" -> "Ejecutar de todas formas"
+   (el exe no está firmado).
+
+Teclas por defecto:
+  F9   guarda los últimos 30 segundos como clip (.mp4)
+  F10  saca una captura de pantalla (.png)
+
+Los archivos van a: %USERPROFILE%\Videos\rclip
+
+Clic en el punto rojo para abrir el menú. Ahí podés:
+  - cambiar la duración (15 s a 5 min)
+  - cambiar la calidad (720p 30 o 60 fps)
+  - cambiar las teclas
+  - abrir la carpeta
+  - hacer que arranque con Windows
+  - salir
+
+Graba la pantalla principal y el sonido del sistema. No graba el micrófono.
+Si algo no anda, mirá %TEMP%\rclip.log
+Configuración: %APPDATA%\rclip\config.ini
+
+Más info: https://github.com/bautistacasero265-maker/app-clips

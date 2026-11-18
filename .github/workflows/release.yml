@@ -1,0 +1,129 @@
+name: build-y-release
+
+on:
+  push:
+    branches: [main, "claude/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  # Build fijado de FFmpeg (gyan.dev, espejo en GitHub). GPL.
+  FFMPEG_VERSION: "8.0.1"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Bajar FFmpeg ${{ env.FFMPEG_VERSION }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $v = $env:FFMPEG_VERSION
+          $url = "https://github.com/GyanD/codexffmpeg/releases/download/$v/ffmpeg-$v-essentials_build.zip"
+          Write-Host "Bajando $url"
+          try {
+            Invoke-WebRequest -Uri $url -OutFile ffmpeg.zip
+          } catch {
+            Write-Host "No se pudo bajar. Versiones disponibles:"
+            gh release list -R GyanD/codexffmpeg -L 15
+            throw
+          }
+          (Get-FileHash ffmpeg.zip -Algorithm SHA256).Hash
+          Expand-Archive ffmpeg.zip -DestinationPath ffx
+          $dir = Get-ChildItem ffx -Directory | Select-Object -First 1
+          Move-Item $dir.FullName ffmpeg
+          Get-ChildItem ffmpeg, ffmpeg\bin
+
+      - name: Verificar filtros y encoders de FFmpeg
+        run: |
+          $ff = "ffmpeg\bin\ffmpeg.exe"
+          & $ff -hide_banner -version | Select-Object -First 3
+          $filters = (& $ff -hide_banner -filters) -join "`n"
+          $encoders = (& $ff -hide_banner -encoders) -join "`n"
+          $missing = @()
+          foreach ($f in 'ddagrab', 'scale_d3d11', 'hwmap', 'hwdownload', 'select', 'scale') {
+            if ($filters -notmatch "\s$f\s") { $missing += "filtro $f" }
+          }
+          foreach ($e in 'h264_nvenc', 'h264_amf', 'h264_qsv', 'libx264', 'aac') {
+            if ($encoders -notmatch "\s$e\s") { $missing += "encoder $e" }
+          }
+          if ($missing.Count -gt 0) { throw "Faltan en FFmpeg: $($missing -join ', ')" }
+          Write-Host "OK: ddagrab, scale_d3d11, h264_nvenc, h264_amf, h264_qsv, libx264"
+          Write-Host "----- ffmpeg -h filter=scale_d3d11 -----"
+          & $ff -hide_banner -h filter=scale_d3d11
+          Write-Host "----- ffmpeg -h filter=ddagrab -----"
+          & $ff -hide_banner -h filter=ddagrab
+
+      - name: Tests (lógica + pipeline real de ffmpeg con fuente de prueba)
+        run: |
+          $env:RCLIP_FFMPEG = (Resolve-Path ffmpeg\bin\ffmpeg.exe).Path
+          cargo test --release -- --nocapture
+
+      - name: Compilar
+        run: |
+          cargo build --release
+          $exe = Get-Item target\release\rclip.exe
+          Write-Host ("rclip.exe: {0:N0} bytes" -f $exe.Length)
+
+      - name: Prueba informativa de ddagrab en el runner (sin GPU; puede fallar)
+        continue-on-error: true
+        run: |
+          $ff = "ffmpeg\bin\ffmpeg.exe"
+          & $ff -hide_banner -loglevel warning -f lavfi -i "ddagrab=framerate=30" -t 2 -vf "hwdownload,format=bgra,scale=-2:720,format=nv12" -c:v libx264 -preset ultrafast -y dda_test.mp4
+          Write-Host "exit code: $LASTEXITCODE"
+
+      - name: Armar zip
+        run: |
+          New-Item -ItemType Directory rclip | Out-Null
+          Copy-Item target\release\rclip.exe rclip\
+          Copy-Item ffmpeg\bin\ffmpeg.exe rclip\
+          Copy-Item dist\LEEME.txt rclip\
+          $lic = Get-ChildItem ffmpeg -File | Where-Object { $_.Name -match 'LICENSE' } | Select-Object -First 1
+          $notice = @"
+          rclip incluye ffmpeg.exe $env:FFMPEG_VERSION (build "essentials" de gyan.dev),
+          licenciado bajo la GNU General Public License v3 (GPLv3).
+
+          Código fuente de FFmpeg: https://ffmpeg.org/download.html
+          (versión $env:FFMPEG_VERSION: https://ffmpeg.org/releases/ffmpeg-$env:FFMPEG_VERSION.tar.xz)
+          Build y sus fuentes/configuración: https://www.gyan.dev/ffmpeg/builds/
+          Espejo usado para bajarlo: https://github.com/GyanD/codexffmpeg/releases/tag/$env:FFMPEG_VERSION
+
+          Texto completo de la licencia a continuación.
+          ------------------------------------------------------------------
+          "@
+          $text = $notice
+          if ($lic) { $text += "`r`n" + (Get-Content $lic.FullName -Raw) }
+          Set-Content -Path rclip\FFMPEG-LICENCIA.txt -Value $text -Encoding utf8
+          Compress-Archive -Path rclip -DestinationPath rclip-windows-x64.zip
+          Get-ChildItem rclip | Format-Table Name, Length
+          Write-Host ("zip: {0:N0} bytes" -f (Get-Item rclip-windows-x64.zip).Length)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rclip-windows-x64
+          path: rclip-windows-x64.zip
+
+      - name: Publicar release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v0.1.${{ github.run_number }}
+          name: rclip v0.1.${{ github.run_number }}
+          target_commitish: ${{ github.sha }}
+          prerelease: ${{ github.ref_name != github.event.repository.default_branch }}
+          files: rclip-windows-x64.zip
+          body: |
+            Bajá **rclip-windows-x64.zip**, descomprimilo en una carpeta y abrí `rclip.exe`.
+            Aparece un punto rojo en la bandeja (al lado del reloj). F9 guarda el clip, F10 saca captura.
+            Instrucciones completas en el README del repo y en LEEME.txt dentro del zip.
+
+            Compilado desde el commit ${{ github.sha }} (rama `${{ github.ref_name }}`).
