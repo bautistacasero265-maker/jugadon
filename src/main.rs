@@ -2885,7 +2885,9 @@ mod app {
                 let clip = CreateRoundRectRgn(tr.left, tr.top, tr.right + 1, tr.bottom + s(16), s(14), s(14));
                 let page_rgn = CreateRectRgn(page.left - s(8), page.top, page.right + s(8), page.bottom);
                 let _ = CombineRgn(Some(clip), Some(clip), Some(page_rgn), RGN_AND);
-                let _ = CombineRgn(Some(clip), Some(clip), Some(CreateRectRgn(tr.left, tr.top, tr.right, tr.bottom)), RGN_AND);
+                let tr_rgn = CreateRectRgn(tr.left, tr.top, tr.right, tr.bottom);
+                let _ = CombineRgn(Some(clip), Some(clip), Some(tr_rgn), RGN_AND);
+                let _ = DeleteObject(tr_rgn.into());
                 SelectClipRgn(dc, Some(clip));
                 fill(dc, tr, THUMB_BG);
                 match it.thumb {
