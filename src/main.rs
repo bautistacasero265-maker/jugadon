@@ -3321,8 +3321,8 @@ mod app {
                 let font = |px: i32, weight: i32, face: PCWSTR| {
                     CreateFontW(-sc(px), 0, 0, 0, weight, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, 0, face)
                 };
-                let ui = w!("Segoe UI");
-                let ic = w!("Segoe MDL2 Assets");
+                let ui = ui_face();
+                let ic = icon_face();
                 let fonts = Fonts {
                     brand: font(24, 800, ui),
                     h1: font(26, 700, ui),
@@ -4110,20 +4110,20 @@ mod app {
     const fn rgb(r: u32, g: u32, b: u32) -> u32 {
         r | (g << 8) | (b << 16)
     }
-    const BG_COLOR: u32 = rgb(15, 14, 21);
-    const SIDE: u32 = rgb(22, 20, 31);
-    const CARD: u32 = rgb(30, 27, 41);
-    const CARD_HOVER: u32 = rgb(40, 36, 55);
-    const NAV_HOVER: u32 = rgb(33, 30, 45);
-    const NAV_SEL: u32 = rgb(44, 37, 60);
-    const TEXT: u32 = rgb(246, 244, 252);
-    const MUTED: u32 = rgb(150, 145, 172);
-    const ORANGE: u32 = rgb(255, 138, 0);
-    const PINK: u32 = rgb(255, 46, 110);
+    const BG_COLOR: u32 = rgb(12, 12, 14);
+    const SIDE: u32 = rgb(17, 17, 20);
+    const CARD: u32 = rgb(24, 24, 28);
+    const CARD_HOVER: u32 = rgb(33, 33, 38);
+    const NAV_HOVER: u32 = rgb(27, 27, 31);
+    const NAV_SEL: u32 = rgb(34, 34, 39);
+    const TEXT: u32 = rgb(247, 247, 250);
+    const MUTED: u32 = rgb(156, 156, 159);
+    const ORANGE: u32 = rgb(255, 122, 32);
+    const PINK: u32 = rgb(255, 92, 64);
     const RED: u32 = rgb(240, 52, 72);
     const BLUE: u32 = rgb(64, 150, 255);
     const GREEN: u32 = rgb(46, 214, 120);
-    const THUMB_BG: u32 = rgb(24, 22, 33);
+    const THUMB_BG: u32 = rgb(20, 20, 23);
     const WM_THUMB: u32 = WM_APP + 10;
 
     impl Gallery {
@@ -4330,6 +4330,7 @@ mod app {
             // ---------- barra lateral ----------
             let sw = s(224);
             fill(dc, rc(0, 0, sw, h), SIDE);
+            fill(dc, rc(sw - 1, 0, sw, h), rgb(30, 30, 35));
             let _ = DrawIconEx(dc, s(20), s(20), self.logo, s(40), s(40), 0, None, DI_NORMAL);
             text(dc, "Jugadón", rc(s(68), s(16), sw, s(48)), self.fonts.brand, TEXT, DT_SINGLELINE | DT_VCENTER);
             text(dc, "tus mejores jugadas", rc(s(69), s(44), sw, s(62)), self.fonts.small, MUTED, DT_SINGLELINE | DT_VCENTER);
@@ -4342,11 +4343,11 @@ mod app {
                 let hover = self.hover == Hit::Nav(i as u8);
                 if selected {
                     round(dc, r, s(10), NAV_SEL);
-                    grad_round(dc, rc(r.left, r.top + s(9), r.left + s(4), r.bottom - s(9)), s(4), ORANGE, PINK, true);
+                    round(dc, rc(r.left, r.top + s(10), r.left + s(3), r.bottom - s(10)), s(3), ORANGE);
                 } else if hover {
                     round(dc, r, s(10), NAV_HOVER);
                 }
-                let c = if selected { TEXT } else { rgb(200, 196, 220) };
+                let c = if selected { TEXT } else { rgb(205, 205, 208) };
                 glyph_at(dc, *glyph, rc(r.left + s(14), r.top, r.left + s(40), r.bottom), self.fonts.icon, if selected { ORANGE } else { c });
                 text(dc, name, rc(r.left + s(46), r.top, r.right, r.bottom), if selected { self.fonts.bold } else { self.fonts.body }, c, DT_SINGLELINE | DT_VCENTER);
                 let n = match i {
@@ -4358,7 +4359,7 @@ mod app {
                 let ns = n.to_string();
                 let pw = s(14) + ns.len() as i32 * s(7);
                 let pr = rc(r.right - s(12) - pw, r.top + s(10), r.right - s(12), r.bottom - s(10));
-                round(dc, pr, s(10), if selected { rgb(70, 58, 92) } else { rgb(40, 36, 54) });
+                round(dc, pr, s(10), if selected { rgb(73, 73, 76) } else { rgb(43, 43, 46) });
                 text(dc, &ns, pr, self.fonts.small, if selected { TEXT } else { MUTED }, DT_SINGLELINE | DT_VCENTER | DT_CENTER);
                 self.hits.push((r, Hit::Nav(i as u8)));
                 y += s(42);
@@ -4369,13 +4370,13 @@ mod app {
             let mut by = h - s(16);
             // tarjeta de estado
             let card = rc(bx.0, by - s(74), bx.1, by);
-            round(dc, card, s(12), rgb(30, 27, 42));
+            round(dc, card, s(12), rgb(33, 33, 36));
             let dot = if rec.is_some() {
                 RED
             } else if live {
                 GREEN
             } else {
-                rgb(120, 116, 140)
+                rgb(125, 125, 128)
             };
             let dr = rc(card.left + s(14), card.top + s(17), card.left + s(24), card.top + s(27));
             ellipse(dc, dr, dot);
@@ -4407,8 +4408,8 @@ mod app {
                 if hover {
                     round(dc, r, s(10), NAV_HOVER);
                 }
-                glyph_at(dc, glyph, rc(r.left + s(12), r.top, r.left + s(38), r.bottom), self.fonts.icon, rgb(200, 196, 220));
-                text(dc, label, rc(r.left + s(44), r.top, r.right, r.bottom), self.fonts.body, rgb(220, 216, 236), DT_SINGLELINE | DT_VCENTER);
+                glyph_at(dc, glyph, rc(r.left + s(12), r.top, r.left + s(38), r.bottom), self.fonts.icon, rgb(205, 205, 208));
+                text(dc, label, rc(r.left + s(44), r.top, r.right, r.bottom), self.fonts.body, rgb(224, 224, 227), DT_SINGLELINE | DT_VCENTER);
                 self.hits.push((r, Hit::Btn(b)));
                 by = r.top - s(2);
             }
@@ -4416,7 +4417,7 @@ mod app {
             // guardar clip
             let r = rc(bx.0, by - s(44), bx.1, by);
             let hover = self.hover == Hit::Btn(1);
-            round(dc, r, s(12), if hover { rgb(58, 50, 80) } else { rgb(44, 38, 62) });
+            round(dc, r, s(12), if hover { rgb(63, 63, 66) } else { rgb(48, 48, 51) });
             glyph_at(dc, 0xE74E, rc(r.left + s(14), r.top, r.left + s(40), r.bottom), self.fonts.icon, ORANGE);
             text(dc, "Guardar clip", rc(r.left + s(46), r.top, r.right, r.bottom), self.fonts.bold, TEXT, DT_SINGLELINE | DT_VCENTER);
             text(dc, &keys.0, rc(r.left, r.top, r.right - s(14), r.bottom), self.fonts.small, MUTED, DT_SINGLELINE | DT_VCENTER | DT_RIGHT);
@@ -4434,8 +4435,7 @@ mod app {
                     text(dc, t, rc(r.left, r.top, r.right - s(16), r.bottom), self.fonts.bold, TEXT, DT_SINGLELINE | DT_VCENTER | DT_RIGHT);
                 }
                 None => {
-                    let (a, b) = if hover { (rgb(255, 160, 40), rgb(255, 70, 130)) } else { (ORANGE, PINK) };
-                    grad_round(dc, r, s(14), a, b, false);
+                    round(dc, r, s(14), if hover { rgb(255, 144, 70) } else { ORANGE });
                     ellipse(dc, rc(r.left + s(18), r.top + s(18), r.left + s(32), r.top + s(32)), TEXT);
                     text(dc, "Grabar pantalla", rc(r.left + s(42), r.top, r.right, r.bottom), self.fonts.bold, TEXT, DT_SINGLELINE | DT_VCENTER);
                     text(dc, &keys.1, rc(r.left, r.top, r.right - s(16), r.bottom), self.fonts.small, rgb(255, 236, 226), DT_SINGLELINE | DT_VCENTER | DT_RIGHT);
@@ -4447,12 +4447,11 @@ mod app {
             let cx0 = sw + s(32);
             let cx1 = w - s(28);
             // resplandor de color arriba (decoración: un degradé, sin imágenes)
-            grad_in(dc, rc(sw, 0, w, s(150)), CreateRectRgn(sw, 0, w, s(150)), rgb(38, 20, 46), BG_COLOR, true);
             let title = NAV[self.nav as usize].0;
             let title = if self.nav == 0 { "Mis clips" } else { title };
             text(dc, title, rc(cx0, s(14), cx1, s(52)), self.fonts.h1, TEXT, DT_SINGLELINE | DT_VCENTER);
             let tw_ = text_w(dc, self.fonts.h1, title);
-            grad_round(dc, rc(cx0 + tw_ + s(12), s(30), cx0 + tw_ + s(40), s(36)), s(6), ORANGE, PINK, false);
+            let _ = tw_;
             // datos y atajos en "pastillas"
             let n = self.view.len();
             let size: u64 = self.view.iter().map(|&i| self.items[i].size).sum();
@@ -4476,8 +4475,8 @@ mod app {
                 self.scroll = 0;
                 let mid = (cx0 + cx1) / 2;
                 let cy = top + (h - top) / 2 - s(90);
-                ellipse(dc, rc(mid - s(86), cy - s(38), mid + s(86), cy + s(134)), rgb(26, 22, 36));
-                ellipse(dc, rc(mid - s(68), cy - s(20), mid + s(68), cy + s(116)), rgb(36, 28, 50));
+                ellipse(dc, rc(mid - s(86), cy - s(38), mid + s(86), cy + s(134)), rgb(28, 28, 31));
+                ellipse(dc, rc(mid - s(68), cy - s(20), mid + s(68), cy + s(116)), rgb(38, 38, 41));
                 let _ = DrawIconEx(dc, mid - s(48), cy, self.logo, s(96), s(96), 0, None, DI_NORMAL);
                 let (t1, t2) = match self.nav {
                     4 => ("Todavía no hay favoritos", "Pasá el mouse por un clip y tocá la estrellita (o clic derecho → Favorito).".to_string()),
@@ -4526,9 +4525,9 @@ mod app {
                 // sombra suave
                 shade_round(dc, rc(r.left + s(2), r.top + s(5), r.right + s(2), r.bottom + s(6)), s(16), 0, 90);
                 if selected {
-                    grad_round(dc, rc(r.left - s(3), r.top - s(3), r.right + s(3), r.bottom + s(3)), s(16), ORANGE, PINK, false);
+                    round(dc, rc(r.left - s(2), r.top - s(2), r.right + s(2), r.bottom + s(2)), s(16), ORANGE);
                 } else if join_no.is_some() {
-                    round(dc, rc(r.left - s(3), r.top - s(3), r.right + s(3), r.bottom + s(3)), s(16), GREEN);
+                    round(dc, rc(r.left - s(2), r.top - s(2), r.right + s(2), r.bottom + s(2)), s(16), GREEN);
                 }
                 round(dc, r, s(14), if hovered || selected { CARD_HOVER } else { CARD });
                 // miniatura (esquinas de arriba redondeadas)
@@ -4558,10 +4557,12 @@ mod app {
                     2 => ("CAPTURA", BLUE),
                     _ => ("VIDEO", rgb(140, 120, 255)),
                 };
-                let lw = s(16) + label.chars().count() as i32 * s(7);
+                // etiqueta sobria: pastilla oscura translúcida con un punto de color
+                let lw = s(26) + label.chars().count() as i32 * s(7);
                 let lr = rc(tr.left + s(10), tr.top + s(10), tr.left + s(10) + lw, tr.top + s(30));
-                round(dc, lr, s(10), color);
-                text(dc, label, lr, self.fonts.badge, TEXT, DT_SINGLELINE | DT_VCENTER | DT_CENTER);
+                shade_round(dc, lr, s(10), 0, 170);
+                ellipse(dc, rc(lr.left + s(8), lr.top + s(7), lr.left + s(14), lr.top + s(13)), color);
+                text(dc, label, rc(lr.left + s(12), lr.top, lr.right, lr.bottom), self.fonts.badge, TEXT, DT_SINGLELINE | DT_VCENTER | DT_CENTER);
                 let fav = self.favs.contains(&it.name);
                 if fav {
                     let fr = rc(lr.right + s(6), lr.top, lr.right + s(28), lr.bottom);
@@ -4593,8 +4594,7 @@ mod app {
                     let (mx, my) = ((tr.left + tr.right) / 2, (tr.top + tr.bottom) / 2);
                     let play = rc(mx - pr, my - pr, mx + pr, my + pr);
                     let ph = self.hover == Hit::Play(idx);
-                    ellipse(dc, rc(play.left - s(3), play.top - s(3), play.right + s(3), play.bottom + s(3)), if ph { TEXT } else { rgb(255, 200, 150) });
-                    grad_ellipse(dc, play, ORANGE, PINK);
+                    ellipse(dc, play, if ph { rgb(255, 144, 70) } else { ORANGE });
                     glyph_at(dc, 0xE768, rc(play.left + s(3), play.top, play.right + s(3), play.bottom), self.fonts.icon_big, TEXT);
                     self.hits.push((play, Hit::Play(idx)));
                     let mut ax = tr.right - s(10);
@@ -4646,7 +4646,7 @@ mod app {
                 let cx = (page.left + page.right) / 2;
                 let bar = rc(cx - bw / 2, h - s(78), cx + bw / 2, h - s(20));
                 shade_round(dc, rc(bar.left + s(2), bar.top + s(6), bar.right + s(2), bar.bottom + s(8)), s(22), 0, 120);
-                round(dc, bar, s(20), rgb(38, 34, 54));
+                round(dc, bar, s(20), rgb(42, 42, 45));
                 self.hits.push((bar, Hit::Btn(7)));
                 let nr = rc(bar.left + s(14), bar.top + s(17), bar.left + s(38), bar.top + s(41));
                 ellipse(dc, nr, GREEN);
@@ -4659,10 +4659,10 @@ mod app {
                     let on = self.hover == Hit::Btn(4);
                     grad_round(dc, jr, s(18), if on { rgb(110, 240, 160) } else { GREEN }, rgb(16, 180, 150), false);
                 } else {
-                    round(dc, jr, s(18), rgb(56, 50, 76));
+                    round(dc, jr, s(18), rgb(61, 61, 64));
                 }
                 text(dc, "Juntar", jr, self.fonts.bold, if nj >= 2 { rgb(6, 34, 18) } else { MUTED }, DT_SINGLELINE | DT_VCENTER | DT_CENTER);
-                round(dc, cr, s(18), if self.hover == Hit::Btn(5) { rgb(70, 62, 98) } else { rgb(52, 46, 72) });
+                round(dc, cr, s(18), if self.hover == Hit::Btn(5) { rgb(77, 77, 80) } else { rgb(57, 57, 60) });
                 text(dc, "Cancelar", cr, self.fonts.small, TEXT, DT_SINGLELINE | DT_VCENTER | DT_CENTER);
                 self.hits.push((jr, Hit::Btn(4)));
                 self.hits.push((cr, Hit::Btn(5)));
@@ -4673,7 +4673,7 @@ mod app {
                 let th_ = ((track.bottom - track.top) * self.page_h / self.content_h.max(1)).max(s(40));
                 let ty = track.top + (track.bottom - track.top - th_) * self.scroll / self.max_scroll().max(1);
                 let active = self.hover == Hit::Bar || self.drag.is_some();
-                round(dc, rc(track.left, ty, track.right, ty + th_), s(6), if active { ORANGE } else { rgb(70, 64, 92) });
+                round(dc, rc(track.left, ty, track.right, ty + th_), s(6), if active { ORANGE } else { rgb(75, 75, 78) });
                 self.hits.push((rc(track.left - s(6), track.top, track.right + s(4), track.bottom), Hit::Bar));
             }
             self.paint_focus(dc, s(2));
@@ -4773,9 +4773,6 @@ mod app {
         grad_in(dc, r, CreateRoundRectRgn(r.left, r.top, r.right + 1, r.bottom + 1, rad, rad), a, b, vertical);
     }
 
-    unsafe fn grad_ellipse(dc: HDC, r: RECT, a: u32, b: u32) {
-        grad_in(dc, r, CreateEllipticRgn(r.left, r.top, r.right + 1, r.bottom + 1), a, b, false);
-    }
 
     /// Capa semitransparente de un color (para oscurecer la miniatura o los fondos de las etiquetas).
     unsafe fn shade(dc: HDC, r: RECT, c: u32, alpha: u8) {
@@ -4824,16 +4821,41 @@ mod app {
         let kw = key.map_or(0, |k| text_w(dc, font, k) + s(14));
         let lw = text_w(dc, font, label);
         let r = rc(x, t, x + s(10) + kw + lw + s(12), b);
-        round(dc, r, s(12), rgb(30, 27, 42));
+        round(dc, r, s(12), rgb(33, 33, 36));
         let mut tx = r.left + s(10);
         if let Some(k) = key {
             let kr = rc(tx - s(4), t + s(4), tx - s(4) + kw, b - s(4));
-            round(dc, kr, s(6), rgb(58, 50, 80));
+            round(dc, kr, s(6), rgb(63, 63, 66));
             text(dc, k, kr, font, TEXT, DT_SINGLELINE | DT_VCENTER | DT_CENTER);
             tx += kw + s(2);
         }
         text(dc, label, rc(tx, t, r.right, b), font, MUTED, DT_SINGLELINE | DT_VCENTER);
         r.right
+    }
+
+    /// ¿Está esta fuente instalada? (mira el archivo en C:\Windows\Fonts, una sola vez)
+    fn has_font(file: &str) -> bool {
+        std::env::var("WINDIR").is_ok_and(|w| Path::new(&w).join("Fonts").join(file).exists())
+    }
+
+    /// Letra moderna de Windows 11 (Segoe UI Variable); en Windows 10, Segoe UI.
+    fn ui_face() -> PCWSTR {
+        static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *V.get_or_init(|| has_font("SegUIVar.ttf")) {
+            w!("Segoe UI Variable Text")
+        } else {
+            w!("Segoe UI")
+        }
+    }
+
+    /// Íconos de Windows 11 (Segoe Fluent Icons, mismos códigos); en Windows 10, Segoe MDL2 Assets.
+    fn icon_face() -> PCWSTR {
+        static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *V.get_or_init(|| has_font("SegoeIcons.ttf")) {
+            w!("Segoe Fluent Icons")
+        } else {
+            w!("Segoe MDL2 Assets")
+        }
     }
 
     unsafe fn glyph_at(dc: HDC, g: u16, r: RECT, font: HFONT, c: u32) {
@@ -5260,7 +5282,7 @@ mod app {
             WM_CTLCOLOREDIT => {
                 let dc = HDC(wp.0 as _);
                 SetTextColor(dc, COLORREF(TEXT));
-                SetBkColor(dc, COLORREF(rgb(52, 46, 72)));
+                SetBkColor(dc, COLORREF(rgb(57, 57, 60)));
                 let br = with_app(|a| a.gallery.as_ref().map(|g| g.edit_brush)).flatten().unwrap_or_default();
                 LRESULT(br.0 as isize)
             }
@@ -5468,11 +5490,11 @@ mod app {
             SetBkMode(dc, TRANSPARENT);
             // encabezado
             fill(dc, rc(0, 0, w, s(58)), SIDE);
-            grad_round(dc, rc(s(20), s(22), s(26), s(36)), s(3), ORANGE, PINK, true);
+            round(dc, rc(s(20), s(23), s(23), s(35)), s(3), ORANGE);
             text(dc, &self.title, rc(s(36), 0, w - s(20), s(58)), title_f, TEXT, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
             if self.player.is_none() {
                 let vr = rc(0, s(58), w, h - self.panel_h());
-                fill(dc, vr, rgb(8, 8, 12));
+                fill(dc, vr, rgb(9, 9, 12));
                 text(dc, "No se puede reproducir acá. Usá \"Reproductor de Windows\".", vr, body, MUTED, DT_SINGLELINE | DT_VCENTER | DT_CENTER);
             }
             // panel de abajo
@@ -5480,17 +5502,17 @@ mod app {
             fill(dc, rc(0, py, w, h), SIDE);
             let tr = self.track_rect();
             let mid = (tr.top + tr.bottom) / 2;
-            round(dc, rc(tr.left, mid - s(4), tr.right, mid + s(4)), s(8), rgb(52, 46, 72));
+            round(dc, rc(tr.left, mid - s(4), tr.right, mid + s(4)), s(8), rgb(57, 57, 60));
             if self.dur > 0.0 {
                 let (xi, xo, xp) = (self.x_at(self.inp), self.x_at(self.out), self.x_at(self.pos));
                 // parte que queda en el recorte
-                grad_round(dc, rc(xi, mid - s(6), xo.max(xi + 1), mid + s(6)), s(10), rgb(255, 160, 60), PINK, false);
+                round(dc, rc(xi, mid - s(5), xo.max(xi + 1), mid + s(5)), s(10), ORANGE);
                 // lo que se saca, más oscuro
                 if xi > tr.left {
-                    round(dc, rc(tr.left, mid - s(4), xi, mid + s(4)), s(8), rgb(38, 34, 52));
+                    round(dc, rc(tr.left, mid - s(4), xi, mid + s(4)), s(8), rgb(41, 41, 44));
                 }
                 if xo < tr.right {
-                    round(dc, rc(xo, mid - s(4), tr.right, mid + s(4)), s(8), rgb(38, 34, 52));
+                    round(dc, rc(xo, mid - s(4), tr.right, mid + s(4)), s(8), rgb(41, 41, 44));
                 }
                 // manijas del recorte
                 for (x, which) in [(xi, VHit::In), (xo, VHit::Out)] {
@@ -5506,7 +5528,7 @@ mod app {
             // botón play/pausa
             let by = py + s(64);
             let pr = rc(s(24), by, s(24) + s(52), by + s(52));
-            grad_ellipse(dc, pr, ORANGE, PINK);
+            ellipse(dc, pr, if self.hover == VHit::Play { rgb(255, 144, 70) } else { ORANGE });
             glyph_at(dc, if self.playing { 0xE769 } else { 0xE768 }, rc(pr.left + if self.playing { 0 } else { s(2) }, pr.top, pr.right, pr.bottom), icon, TEXT);
             self.hits.push((pr, VHit::Play));
             let t = if self.trimmed() {
@@ -5522,9 +5544,9 @@ mod app {
                 let on = self.hover == VHit::Btn(b);
                 let accent = b == 0 && self.trimmed();
                 if accent {
-                    grad_round(dc, r, s(22), if on { rgb(255, 160, 40) } else { ORANGE }, PINK, false);
+                    round(dc, r, s(22), if on { rgb(255, 144, 70) } else { ORANGE });
                 } else {
-                    round(dc, r, s(22), if on { rgb(66, 58, 92) } else { rgb(44, 38, 62) });
+                    round(dc, r, s(22), if on { rgb(72, 72, 75) } else { rgb(48, 48, 51) });
                 }
                 let gr = if label.is_empty() { r } else { rc(r.left + s(10), r.top, r.left + s(38), r.bottom) };
                 glyph_at(dc, glyph, gr, icon, if accent { TEXT } else { ORANGE });
@@ -5535,7 +5557,7 @@ mod app {
                     let tip = "Abrir en el reproductor de Windows";
                     let tw2 = text_w(dc, body, tip) + s(16);
                     let tr2 = rc(r.right - tw2, r.top - s(30), r.right, r.top - s(6));
-                    round(dc, tr2, s(10), rgb(44, 38, 62));
+                    round(dc, tr2, s(10), rgb(48, 48, 51));
                     text(dc, tip, tr2, body, TEXT, DT_SINGLELINE | DT_VCENTER | DT_CENTER);
                 }
                 x = r.left - s(8);
@@ -5595,7 +5617,7 @@ mod app {
                 let font = |px: i32, weight: i32, face: PCWSTR| {
                     CreateFontW(-sc(px), 0, 0, 0, weight, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, 0, face)
                 };
-                let fonts = [font(18, 700, w!("Segoe UI")), font(13, 400, w!("Segoe UI")), font(14, 600, w!("Segoe UI")), font(18, 400, w!("Segoe MDL2 Assets"))];
+                let fonts = [font(18, 700, ui_face()), font(13, 400, ui_face()), font(14, 600, ui_face()), font(18, 400, icon_face())];
                 // reproductor de Windows (Media Foundation): decodifica la placa de video
                 let _ = windows::Win32::Media::MediaFoundation::MFStartup(0x0002_0070, 1);
                 let url = wide(&path.to_string_lossy());
@@ -5935,7 +5957,7 @@ mod app {
                 let font = |px: i32, weight: i32, face: PCWSTR| {
                     CreateFontW(-(px * dpi / 96), 0, 0, 0, weight, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, 0, face)
                 };
-                let fonts = [font(17, 700, w!("Segoe UI")), font(13, 400, w!("Segoe UI")), font(18, 400, w!("Segoe MDL2 Assets"))];
+                let fonts = [font(17, 700, ui_face()), font(13, 400, ui_face()), font(18, 400, icon_face())];
                 OVL.with(|o| *o.borrow_mut() = Some(Ovl { hwnd: h, title: String::new(), sub: String::new(), kind: 0, t0: Instant::now(), fonts, dpi }));
                 h
             }
@@ -5989,16 +6011,17 @@ mod app {
                     let o = o.borrow();
                     let Some(v) = o.as_ref() else { return };
                     let s = |x: i32| x * v.dpi / 96;
-                    fill(mem, rc(0, 0, w, h), rgb(20, 18, 28));
+                    fill(mem, rc(0, 0, w, h), rgb(22, 22, 25));
                     let (a, b) = match v.kind {
                         1 => (RED, rgb(255, 90, 110)),
                         2 => (rgb(255, 176, 0), rgb(255, 120, 0)),
                         _ => (ORANGE, PINK),
                     };
-                    grad_in(mem, rc(0, 0, s(6), h), CreateRectRgn(0, 0, s(6), h), a, b, true);
+                    let _ = b;
+                    fill(mem, rc(0, 0, s(4), h), a);
                     let d = s(36);
                     let cr = rc(s(20), (h - d) / 2, s(20) + d, (h + d) / 2);
-                    grad_ellipse(mem, cr, a, b);
+                    ellipse(mem, cr, a);
                     match v.kind {
                         1 => ellipse(mem, rc(cr.left + s(12), cr.top + s(12), cr.right - s(12), cr.bottom - s(12)), TEXT),
                         2 => glyph_at(mem, 0xE7BA, cr, v.fonts[2], TEXT),
