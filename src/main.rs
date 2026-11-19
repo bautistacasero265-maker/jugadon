@@ -5408,6 +5408,7 @@ mod app {
 
         /// Lee posición y duración del reproductor.
         fn poll(&mut self) {
+            STEP.store(40, Ordering::Relaxed);
             use windows::Win32::Media::MediaFoundation::MFP_POSITIONTYPE_100NS;
             let Some(p) = &self.player else { return };
             unsafe {
@@ -5510,6 +5511,7 @@ mod app {
             let dpi = windows::Win32::UI::HiDpi::GetDpiForWindow(self.hwnd).max(96) as i32;
             let s = move |v: i32| v * dpi / 96;
             let [title_f, body, bold, icon] = self.fonts;
+            STEP.store(20, Ordering::Relaxed);
             self.hits.clear();
             SetBkMode(dc, TRANSPARENT);
             // encabezado
@@ -5549,6 +5551,7 @@ mod app {
                 ellipse(dc, rc(xp - s(9), mid - s(9), xp + s(9), mid + s(9)), TEXT);
             }
             self.hits.insert(0, (rc(tr.left - s(8), tr.top - s(6), tr.right + s(8), tr.bottom + s(6)), VHit::Track));
+            STEP.store(21, Ordering::Relaxed);
             // botón play/pausa
             let by = py + s(64);
             let pr = rc(s(24), by, s(24) + s(52), by + s(52));
@@ -5588,7 +5591,9 @@ mod app {
                 }
                 x = r.left - s(8);
             }
+            STEP.store(22, Ordering::Relaxed);
             text(dc, &t, rc(pr.right + s(14), by, x - s(6), by + s(52)), bold, TEXT, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+            STEP.store(23, Ordering::Relaxed);
             if !self.trimmed() && self.dur > 0.0 {
                 text(dc, "Arrastrá las manijas amarillas para recortar  ·  Espacio: pausa  ·  I / O: marcar inicio y fin", rc(s(24), h - s(22), w, h - s(4)), body, MUTED, DT_SINGLELINE | DT_VCENTER);
             }
@@ -5676,8 +5681,11 @@ mod app {
                 // reproductor de Windows (Media Foundation): decodifica la placa de video
                 let _ = windows::Win32::Media::MediaFoundation::MFStartup(0x0002_0070, 1);
                 let url = wide(&path.to_string_lossy());
+                STEP.store(10, Ordering::Relaxed);
                 let sound_out = crate::audio::has_output();
+                STEP.store(11, Ordering::Relaxed);
                 let created = open_player(&url, video, sound_out);
+                STEP.store(12, Ordering::Relaxed);
                 let player = created.as_ref().ok().cloned();
                 match &created {
                     Err(e) => log_line(&self.log_path, &format!("visor: no se pudo reproducir ({e})")),
@@ -5758,7 +5766,9 @@ mod app {
                 let _ = BeginPaint(hwnd, &mut ps);
                 with_app(|a| {
                     if let Some(p) = a.viewer.as_ref().and_then(|v| v.player.as_ref()) {
+                        STEP.store(30, Ordering::Relaxed);
                         let _ = p.UpdateVideo();
+                        STEP.store(31, Ordering::Relaxed);
                     }
                 });
                 let _ = EndPaint(hwnd, &ps);
@@ -6150,6 +6160,23 @@ mod app {
 
     // ---------- ventana y mensajes ----------
 
+    static CRASH_LOG: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    /// Lo último que se estaba haciendo (para el registro si la app se cae de golpe).
+    static STEP: AtomicU32 = AtomicU32::new(0);
+
+    /// Si Windows cierra la app por un error grave, deja escrito qué fue y dónde.
+    unsafe extern "system" fn crash_filter(info: *const windows::Win32::System::Diagnostics::Debug::EXCEPTION_POINTERS) -> i32 {
+        if let (Some(log), Some(rec)) = (CRASH_LOG.get(), info.as_ref().and_then(|i| i.ExceptionRecord.as_ref())) {
+            let base = GetModuleHandleW(None).map_or(0, |h| h.0 as usize);
+            let addr = rec.ExceptionAddress as usize;
+            log_line(
+                log,
+                &format!("CAÍDA: código {:#x} en {:#x} (exe+{:#x}), paso {}", rec.ExceptionCode.0 as u32, addr, addr.wrapping_sub(base), STEP.load(Ordering::Relaxed)),
+            );
+        }
+        0 // EXCEPTION_CONTINUE_SEARCH: Windows sigue con el cierre normal
+    }
+
     fn with_app<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
         APP.with(|a| match a.try_borrow_mut() {
             Ok(mut g) => g.as_mut().map(f),
@@ -6404,6 +6431,8 @@ mod app {
                 // si algo falla de verdad, que quede escrito dónde (para arreglarlo)
                 let lp = log_path.clone();
                 std::panic::set_hook(Box::new(move |info| log_line(&lp, &format!("ERROR INTERNO: {info}"))));
+                let _ = CRASH_LOG.set(log_path.clone());
+                windows::Win32::System::Diagnostics::Debug::SetUnhandledExceptionFilter(Some(crash_filter));
             }
             let appdata = env_path("APPDATA", ".");
             let cfg_path = appdata.join("Jugadon").join("config.ini");
