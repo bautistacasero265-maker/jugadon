@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Video promocional vertical (1080x1920, 60 fps, ~25 s) de Jugadón, para TikTok / Reels / Shorts.
+"""Video promocional vertical (1080x1920, 60 fps, ~30 s) de Jugadón, para TikTok / Reels / Shorts.
 
 Se genera todo acá, en la nube:
 - voz neural argentina (edge-tts, es-AR) con el momento exacto de cada palabra; si falla, Piper.
@@ -75,14 +75,15 @@ SCRIPT = [
     ("Esto se arregla con una sola tecla.", "fix"),
     ("Apretás F9 y se guardan los últimos treinta segundos.", "f9"),
     ("¿Y los FPS? Ni se enteran: lo hace tu placa de video.", "gpu"),
-    ("Pesa menos que una foto: ciento ocho kilobytes.", "light"),
-    ("Tocás el clip y lo recortás ahí mismo…", "edit"),
+    ("Un toque y lo tenés vertical para TikTok.", "vertical"),
+    ("¿Gritaste de más? Sacás tu voz sin volver a grabar.", "mic"),
+    ("Juntás tus mejores jugadas en un solo video…", "join"),
     ("…y copiás un link que abre cualquiera.", "link"),
     ("Gratis. Sin cuentas. Sin vueltas.", "free"),
     ("Bajalo ya: el link está en la bio.", "cta"),
 ]
 # palabras que van en color y más grandes en los subtítulos
-KEYWORDS = {"pará", "jugada", "grabaste", "tecla", "f9", "treinta", "fps", "placa", "foto", "kilobytes", "recortás", "link", "gratis", "cuentas", "vueltas", "bio", "ya"}
+KEYWORDS = {"pará", "jugada", "grabaste", "tecla", "f9", "treinta", "fps", "placa", "vertical", "tiktok", "gritaste", "voz", "juntás", "jugadas", "video", "link", "gratis", "cuentas", "vueltas", "bio", "ya"}
 
 
 # ---------------------------------------------------------------- voz
@@ -707,6 +708,143 @@ def sc_edit(img, t, dur, ctx):
         d.text((100, py + 200), f"queda: 0:{int(30 - 15 * e):02d}", font=font(40, False), fill=MUTED)
 
 
+_game = {}
+
+
+def game_frame():
+    """Un cuadro de "juego" 16:9 (dibujado acá): cielo, piso, mira, kill-feed y el cartel ACE."""
+    if "f" in _game:
+        return _game["f"], _game["b"]
+    gw, gh = 960, 540
+    y = np.linspace(0, 1, gh)[:, None, None]
+    sky = np.array((40, 90, 160), np.float32) * (1 - y) + np.array((250, 150, 90), np.float32) * y
+    im = Image.fromarray(np.repeat(sky, gw, axis=1).astype(np.uint8), "RGB")
+    d = ImageDraw.Draw(im)
+    d.polygon([(0, 360), (220, 250), (420, 330), (640, 230), (960, 340), (960, 540), (0, 540)], fill=(46, 40, 60))
+    d.polygon([(0, 430), (960, 410), (960, 540), (0, 540)], fill=(30, 26, 40))
+    d.rectangle((560, 250, 640, 420), fill=(70, 60, 90))
+    cx, cy = gw // 2, gh // 2
+    for a, b, c, e in ((cx - 40, cy, cx - 12, cy), (cx + 12, cy, cx + 40, cy), (cx, cy - 40, cx, cy - 12), (cx, cy + 12, cx, cy + 40)):
+        d.line((a, b, c, e), fill=(120, 255, 160), width=6)
+    for i, n in enumerate(("Vos  ▸  xXSniperXx", "Vos  ▸  ElTanque", "Vos  ▸  ElUltimo")):
+        f = font(26)
+        w = d.textlength(n, font=f) + 30
+        rounded(d, (gw - 20 - w, 20 + i * 48, gw - 20, 60 + i * 48), 10, (0, 0, 0))
+        d.text((gw - 5 - w, 26 + i * 48), n, font=f, fill=WHITE)
+    f = font(120)
+    w = d.textlength("ACE", font=f)
+    d.text(((gw - w) / 2, 330), "ACE", font=f, fill=YELLOW, stroke_width=8, stroke_fill=(0, 0, 0))
+    _game["f"] = im
+    _game["b"] = im.resize((135, 76), Image.BILINEAR).filter(ImageFilter.GaussianBlur(5))
+    return _game["f"], _game["b"]
+
+
+def sc_vertical(img, t, dur, ctx):
+    d = ImageDraw.Draw(img)
+    clip, blur = game_frame()
+    # el clip horizontal se "dobla" a celular: queda entero y arriba y abajo va el fondo desenfocado
+    k = ease_out((t - 0.35) / 0.55)
+    w = int(900 + (506 - 900) * k)
+    h = int(506 + (900 - 506) * k)
+    cx, cy = W // 2, 860
+    x0, y0 = cx - w // 2, cy - h // 2
+    frame = blur.resize((max(1, int(h * 16 / 9)), h), Image.BILINEAR)
+    frame = frame.crop(((frame.width - w) // 2, 0, (frame.width - w) // 2 + w, h))
+    fg = clip.resize((w, int(w * 9 / 16)), Image.BILINEAR)
+    frame.paste(fg, (0, (h - fg.height) // 2))
+    mask = Image.new("L", (w, h), 0)
+    ImageDraw.Draw(mask).rounded_rectangle((0, 0, w - 1, h - 1), int(24 + 40 * k), fill=255)
+    rounded(d, (x0 - 14, y0 - 14, x0 + w + 14, y0 + h + 14), int(36 + 46 * k), (20, 18, 28), outline=ORANGE if k > 0.98 else (90, 80, 125), width=6)
+    img.paste(frame, (x0, y0), mask)
+    if k > 0.6:
+        # isla del celular
+        rounded(d, (cx - 70, y0 + 18, cx + 70, y0 + 48), 15, (0, 0, 0))
+    if t > 0.95:
+        s = ease_back((t - 0.95) / 0.25)
+        chip(d, W // 2, 1350, "1080×1920 · TikTok · Reels · Shorts", int(42 * min(1.08, s)), fill=(44, 38, 62))
+    sticker(img, "📱", 200, 420, 0.95, t, 170, -12)
+
+
+def wave_bars(d, x0, x1, yc, amp, t, seed, color, muted=0.0):
+    n = 34
+    step = (x1 - x0) / n
+    for i in range(n):
+        v = abs(math.sin(i * 0.9 + seed) * 0.6 + math.sin(i * 0.37 + t * 9 + seed) * 0.4)
+        hh = max(6, amp * v * (1 - muted))
+        x = x0 + i * step
+        rounded(d, (x, yc - hh, x + step * 0.6, yc + hh), int(step * 0.3), color)
+
+
+def sc_mic(img, t, dur, ctx):
+    d = ImageDraw.Draw(img)
+    # dos pistas: el juego y tu voz. A tu voz le cae el "mute" y se apaga; el juego sigue
+    tracks = [("🎮", "Juego", ORANGE, 0.0), ("🎙️", "Tu voz", PINK, 0.15)]
+    mute_at = 0.85
+    for i, (e, label, col, t0) in enumerate(tracks):
+        if t < t0:
+            continue
+        k = ease_out((t - t0) / 0.35)
+        y = 520 + i * 360
+        x = int(-700 * (1 - k))
+        rounded(d, (70 + x, y, W - 70 + x, y + 290), 44, (30, 27, 42), outline=(90, 80, 125), width=3)
+        paste_center(img, emoji(e, 90), 150 + x, y + 72)
+        d.text((215 + x, y + 38), label, font=font(56), fill=WHITE)
+        muted = 0.0
+        if i == 1 and t > mute_at:
+            muted = min(1.0, (t - mute_at) / 0.25)
+        wave_bars(d, 120 + x, W - 120 + x, y + 190, 62, t, i * 2.0, (90, 84, 110) if muted >= 1 else col, muted)
+        if i == 1 and t > mute_at:
+            s = ease_back((t - mute_at) / 0.22)
+            cx, cy, r = W - 190, y + 72, int(56 * min(1.1, s))
+            d.ellipse((cx - r, cy - r, cx + r, cy + r), fill=RED)
+            d.line((cx - r * 0.45, cy - r * 0.45, cx + r * 0.45, cy + r * 0.45), fill=WHITE, width=12)
+            d.line((cx - r * 0.45, cy + r * 0.45, cx + r * 0.45, cy - r * 0.45), fill=WHITE, width=12)
+    if t > mute_at + 0.35:
+        s = ease_back((t - mute_at - 0.35) / 0.25)
+        tc(d, 1290, "VOZ AFUERA", int(120 * min(1.1, s)), YELLOW, stroke=8)
+    sticker(img, "🤫", W - 200, 380, mute_at + 0.1, t, 170, 10)
+
+
+def sc_join(img, t, dur, ctx):
+    d = ImageDraw.Draw(img)
+    clip, _ = game_frame()
+    # tres clips sueltos se juntan en una sola tira
+    cards = [("🔥", (255, 120, 40)), ("💀", (120, 90, 255)), ("🏆", (255, 196, 0))]
+    k = ease_out((t - 0.45) / 0.45)
+    cw, ch = 300, 169
+    for i, (e, col) in enumerate(cards):
+        t0 = 0.05 + i * 0.12
+        if t < t0:
+            continue
+        a = ease_back((t - t0) / 0.25)
+        sx, sy = 190 + i * 350, 560 + (i % 2) * 260
+        ex, ey = W // 2 - int(1.5 * cw) + i * cw + cw // 2, 860
+        cx, cy = sx + (ex - sx) * k, sy + (ey - sy) * k
+        th = clip.resize((cw - 12, ch - 12), Image.BILINEAR)
+        tint = Image.new("RGB", th.size, col)
+        th = Image.blend(th, tint, 0.35)
+        sub = Image.new("RGBA", (cw, ch), (0, 0, 0, 0))
+        sd = ImageDraw.Draw(sub)
+        sd.rounded_rectangle((0, 0, cw - 1, ch - 1), int(26 * (1 - k)) + 4, fill=WHITE + (255,))
+        sub.paste(th, (6, 6))
+        sd.ellipse((14, 14, 70, 70), fill=GREEN + (255,))
+        f = font(40)
+        sd.text((42 - sd.textlength(str(i + 1), font=f) / 2, 16), str(i + 1), font=f, fill=(6, 40, 20))
+        paste_center(img, sub, cx, cy, a * (1 - 0.0 * k), (i - 1) * 8 * (1 - k))
+        paste_center(img, emoji(e, 70), cx + cw / 2 - 40, cy - ch / 2 + 40, a)
+    if k >= 1:
+        # la tira ya es un video: marco y barra de reproducción
+        x0, x1 = W // 2 - int(1.5 * cw), W // 2 + int(1.5 * cw)
+        d.rounded_rectangle((x0 - 10, 860 - ch // 2 - 10, x1 + 10, 860 + ch // 2 + 10), 18, outline=ORANGE, width=8)
+        p = min(1.0, (t - 0.9) / max(0.1, dur - 1.0))
+        rounded(d, (x0, 860 + ch // 2 + 40, x1, 860 + ch // 2 + 56), 8, (60, 54, 84))
+        rounded(d, (x0, 860 + ch // 2 + 40, x0 + int((x1 - x0) * p), 860 + ch // 2 + 56), 8, ORANGE)
+        s = ease_back((t - 0.9) / 0.25)
+        tc(d, 1180, "MONTAJE LISTO", int(116 * min(1.1, s)), YELLOW, stroke=8)
+    sticker(img, "🎬", 210, 380, 0.9, t, 170, -10)
+
+
+
 def sc_link(img, t, dur, ctx):
     d = ImageDraw.Draw(img)
     toast(img, 200 - 360 * (1 - ease_out(t / 0.3)), "Link copiado", "lo abre cualquiera, sin la app", ctx["icon"], BLUE)
@@ -764,7 +902,7 @@ def sc_cta(img, t, dur, ctx):
     sticker(img, "👇", W - 210, 1330, 0.5, t, 150)
 
 
-SCENES = {"hook": sc_hook, "fix": sc_fix, "f9": sc_f9, "gpu": sc_gpu, "light": sc_light, "edit": sc_edit, "link": sc_link, "free": sc_free, "cta": sc_cta}
+SCENES = {"hook": sc_hook, "fix": sc_fix, "f9": sc_f9, "gpu": sc_gpu, "light": sc_light, "edit": sc_edit, "vertical": sc_vertical, "mic": sc_mic, "join": sc_join, "link": sc_link, "free": sc_free, "cta": sc_cta}
 
 
 # ---------------------------------------------------------------- subtítulos
@@ -864,6 +1002,8 @@ def main():
     beat = 60 / BPM
     print(f"duración total: {total:.1f} s; escenas: " + ", ".join(f"{d:.1f}" for d in durs))
 
+    at = {k: starts[i] for i, (_, k) in enumerate(SCRIPT)}
+    idx = {k: i for i, (_, k) in enumerate(SCRIPT)}
     fx = FX()
     hook_freeze = durs[0] * 0.58
     drop = starts[1]
@@ -871,12 +1011,15 @@ def main():
     fx.impact(starts[1] + 0.32, 1.4, W // 2, 980)
     fx.confetti(starts[1] + 0.32, W // 2, 980, 80, 1)
     fx.confetti(starts[2] + 0.8, W // 2, 330, 70, 2)
-    fx.impact(starts[4] + 1.1, 0.8)
-    fx.confetti(starts[6] + 0.8, W // 2, 900, 60, 3)
-    for wt, w_ in words_per[7]:
+    fx.impact(at["vertical"] + 0.9, 0.8, W // 2, 860)
+    fx.impact(at["mic"] + 0.85, 0.9, W - 190, 952)
+    fx.impact(at["join"] + 0.9, 1.0, W // 2, 860)
+    fx.confetti(at["join"] + 0.9, W // 2, 860, 60, 5)
+    fx.confetti(at["link"] + 0.8, W // 2, 900, 60, 3)
+    for wt, w_ in words_per[idx["free"]]:
         if _norm(w_) in ("gratis", "cuentas", "vueltas"):
-            fx.impact(starts[7] + wt, 1.0)
-    fx.confetti(starts[8] + 0.3, W // 2, 560, 90, 4)
+            fx.impact(at["free"] + wt, 1.0)
+    fx.confetti(at["cta"] + 0.3, W // 2, 560, 90, 4)
 
     # ---------- audio: tres pistas y mastering con ffmpeg
     mus = music(total, drop, beat)
@@ -891,13 +1034,18 @@ def main():
     add(sfx, boom(), starts[1] + 0.32, 1.0)
     add(sfx, click(), starts[1] + 0.32, 1.0)
     add(sfx, ding(), starts[2] + 0.75, 1.0)
-    add(sfx, ding(), starts[6] + 0.0, 0.9)
+    add(sfx, ding(), at["link"] + 0.0, 0.9)
+    add(sfx, pop(), at["vertical"] + 0.9, 0.9)
+    add(sfx, click(), at["mic"] + 0.85, 1.0)
+    add(sfx, ding(), at["join"] + 0.9, 0.9)
     for t0, st_, _, _ in fx.impacts:
         add(sfx, boom()[: int(SR * 0.5)] * 0.7, t0, st_ * 0.7)
     for i in range(5):
         add(sfx, pop(), 0.12 + i * 0.22, 0.6)
     for t0 in (0.35, 0.75, 1.05):
-        add(sfx, pop(), starts[6] + t0, 0.7)
+        add(sfx, pop(), at["link"] + t0, 0.7)
+    for i in range(3):
+        add(sfx, pop(), at["join"] + 0.05 + i * 0.12, 0.6)
     # en el congelado del gancho la música no se corta: solo baja un poco (sin "parones")
     i0, i1 = int(hook_freeze * SR), int(drop * SR)
     mus[i0:i1] *= 0.55
