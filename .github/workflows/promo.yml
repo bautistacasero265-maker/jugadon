@@ -29,9 +29,15 @@ jobs:
 
       - name: Instalar ffmpeg, Piper (voz) y librerías
         run: |
-          # ffmpeg ya viene en la imagen de GitHub; los emojis a color se instalan si el espejo de apt responde
-          command -v ffmpeg || (timeout 300 sudo apt-get update -qq && timeout 300 sudo apt-get install -y -qq ffmpeg)
-          timeout 240 sudo apt-get install -y -qq --no-install-recommends fonts-noto-color-emoji || echo "sin emojis a color"
+          # sin apt (a veces sus espejos no responden): ffmpeg estático desde GitHub y la fuente de emojis de Google
+          if ! command -v ffmpeg >/dev/null; then
+            curl -fsSL --retry 3 -o ff.tar.xz https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz
+            mkdir -p ffx && tar -xJf ff.tar.xz -C ffx --strip-components=1
+            sudo cp ffx/bin/ffmpeg ffx/bin/ffprobe /usr/local/bin/
+          fi
+          ffmpeg -hide_banner -version | head -1
+          sudo mkdir -p /usr/share/fonts/truetype/noto
+          sudo curl -fsSL --retry 3 -o /usr/share/fonts/truetype/noto/NotoColorEmoji.ttf https://github.com/googlefonts/noto-emoji/raw/main/fonts/NotoColorEmoji.ttf || echo "sin emojis a color"
           # voz neural argentina (edge-tts); Piper queda de respaldo
           pip install -q "edge-tts==7.3.1" "piper-tts==1.2.0" pillow numpy
 
