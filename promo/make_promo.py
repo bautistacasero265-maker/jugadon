@@ -28,7 +28,7 @@ from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 ROOT = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(ROOT)
 W, H, FPS, SR = 1080, 1920, 60, 48000
-BPM = 128
+BPM = 90
 
 ORANGE = (255, 138, 0)
 PINK = (255, 46, 110)
@@ -261,61 +261,98 @@ def click():
     return noise(n, 5) * env_exp(n, 140) * 0.7
 
 
-def pluck(freq, dur, bright=1.0):
+def rhodes(freq, dur, vol=1.0):
+    """Piano eléctrico suave (tipo lo-fi): fundamental + armónicos que se apagan + trémolo leve."""
     n = int(SR * dur)
     t = np.arange(n) / SR
-    x = np.sign(np.sin(2 * np.pi * freq * t)) * 0.5 + np.sin(2 * np.pi * freq * 2 * t) * 0.3 * bright
-    return (x * np.exp(-t * 14)).astype(np.float32)
+    x = np.sin(2 * np.pi * freq * t) + 0.35 * np.sin(2 * np.pi * freq * 2 * t) * np.exp(-t * 6) + 0.12 * np.sin(2 * np.pi * freq * 3 * t) * np.exp(-t * 10)
+    x *= (1 - np.exp(-t * 200)) * np.exp(-t * 1.1) * (1 + 0.15 * np.sin(2 * np.pi * 4.5 * t))
+    return (x * vol).astype(np.float32)
+
+
+def bell(freq, dur):
+    n = int(SR * dur)
+    t = np.arange(n) / SR
+    x = np.sin(2 * np.pi * freq * t) + 0.4 * np.sin(2 * np.pi * freq * 3.01 * t) * np.exp(-t * 8)
+    return (x * (1 - np.exp(-t * 300)) * np.exp(-t * 4)).astype(np.float32)
+
+
+def soft_snare(seed):
+    n = int(SR * 0.25)
+    x = onepole(noise(n, seed), 0.35) * env_exp(n, 16) * 0.7 + sweep(240, 180, 0.25, 20) * env_exp(n, 25) * 0.4
+    return x.astype(np.float32)
 
 
 def music(total, drop_at, beat):
-    """Beat de 128 BPM en estéreo, brillante y con empuje.
-    Antes del drop: arpegio filtrado que va abriendo (sube la tensión, sin silencios).
-    Después: bombo, palmas, hi-hats, bajo con bombeo y arpegio abierto a los costados."""
+    """Beat chill (lo-fi) de 90 BPM en estéreo, para que quede de fondo y resalte la voz:
+    acordes de piano eléctrico, melodía pegadiza de campanita, batería relajada con swing,
+    bajo grave y crujido de vinilo. Antes del drop: solo piano y vinilo (filtrados), después entra todo."""
     n = int(total * SR) + SR
     L = np.zeros(n, np.float32)
     R = np.zeros(n, np.float32)
-    k, c = kick(), clap()
-    chords = [(220.0, 261.6, 329.6), (174.6, 220.0, 261.6), (261.6, 329.6, 392.0), (196.0, 246.9, 293.7)]  # Am F C G
+    # Am7, Fmaj7, Cmaj7, G6
+    chords = [(220.0, 261.6, 329.6, 392.0), (174.6, 220.0, 261.6, 329.6), (261.6, 329.6, 392.0, 493.9), (196.0, 246.9, 293.7, 329.6)]
     roots = [55.0, 43.65, 65.41, 49.0]
-    bass = np.zeros(n, np.float32)
+    hook = [659.3, 784.0, 880.0, 784.0, 659.3, 587.3, 659.3, 0]  # motivo de la melodía (corcheas)
+    swing = beat * 0.12
+    k = kick() * 0.8
     t, i = 0.0, 0
     while t < total:
         bar = (i // 4) % 4
+        pos = i % 4
         after = t >= drop_at
         ch = chords[bar]
-        # arpegio en semicorcheas, alternando izquierda/derecha
-        for q in range(4):
-            tq = t + q * beat / 4
-            f = ch[(i * 4 + q) % 3] * (2 if q % 2 else 1)
-            p = pluck(f, beat * 0.5, 1.0 if after else 0.3)
-            vol = 0.16 if after else 0.05 + 0.13 * min(1.0, t / max(drop_at, 0.1))
-            add(L, p, tq, vol * (1.0 if q % 2 == 0 else 0.45))
-            add(R, p, tq, vol * (0.45 if q % 2 == 0 else 1.0))
+        if pos == 0 or pos == 2:
+            # acorde: notas apenas escalonadas (como tocado a mano), abierto en estéreo
+            for j, f in enumerate(ch):
+                r = rhodes(f, beat * 2.2, 0.11 if pos == 0 else 0.07)
+                add(L, r, t + j * 0.012, 1.0 if j % 2 == 0 else 0.6)
+                add(R, r, t + j * 0.012, 0.6 if j % 2 == 0 else 1.0)
         if after:
-            add(L, k, t, 1.0)
-            add(R, k, t, 1.0)
-            if i % 2 == 1:
-                add(L, c, t, 0.6)
-                add(R, c, t + 0.008, 0.6)
-            add(L, hat(i), t + beat / 2, 0.9)
-            add(R, hat(i + 50), t + beat / 4, 0.6)
-            add(R, hat(i + 99), t + beat * 0.75, 0.6)
-            root = roots[bar]
-            m = int(SR * beat)
-            tt = np.arange(m) / SR
-            saw = (2 * ((tt * root * 2) % 1) - 1) * 0.5 + np.sin(2 * np.pi * root * tt)
-            add(bass, (saw * (1 - np.exp(-tt * 14))).astype(np.float32), t, 0.32)
-        else:
-            # antes del drop: bombo suave cada 2 tiempos para que no se sienta vacío
-            if i % 2 == 0:
-                add(L, k, t, 0.45)
-                add(R, k, t, 0.45)
+            # batería relajada: bombo en 1 y "y del 2", caja suave en 2 y 4, hi-hats con swing
+            if pos == 0:
+                add(L, k, t, 1.0)
+                add(R, k, t, 1.0)
+            if pos == 1:
+                add(L, k, t + beat / 2, 0.7)
+                add(R, k, t + beat / 2, 0.7)
+            if pos in (1, 3):
+                sn = soft_snare(i)
+                add(L, sn, t, 0.75)
+                add(R, sn, t + 0.006, 0.75)
+            add(L, hat(i) * 0.6, t, 0.5)
+            add(R, hat(i + 77) * 0.6, t + beat / 2 + swing, 0.55)
+            # bajo grave redondo
+            if pos in (0, 1):
+                m = int(SR * beat * 0.9)
+                tt = np.arange(m) / SR
+                b = np.sin(2 * np.pi * roots[bar] * tt) * (1 - np.exp(-tt * 60)) * np.exp(-tt * 1.5)
+                add(L, b.astype(np.float32), t + (0 if pos == 0 else beat / 2), 0.4)
+                add(R, b.astype(np.float32), t + (0 if pos == 0 else beat / 2), 0.4)
+            # melodía pegadiza (cada dos compases, en corcheas)
+            if (i // 4) % 2 == 0:
+                for e in range(2):
+                    f = hook[(pos * 2 + e) % len(hook)]
+                    if f:
+                        te = t + e * beat / 2 + (swing if e else 0)
+                        bl = bell(f, beat * 0.9)
+                        add(L, bl, te, 0.07)
+                        add(R, bl, te + 0.01, 0.09)
         t += beat
         i += 1
-    bass = onepole(bass, 0.15)
-    L += bass
-    R += bass
+    # vinilo: siseo muy bajo y crujidos sueltos
+    rng = np.random.default_rng(9)
+    hiss = onepole(noise(n, 11), 0.5) * 0.012
+    crack = np.zeros(n, np.float32)
+    for p in rng.integers(0, n - 200, int(total * 7)):
+        crack[p:p + 60] += rng.uniform(0.02, 0.06) * np.exp(-np.arange(60) / 8)
+    L += hiss + crack
+    R += hiss + np.roll(crack, 300)
+    # cálido: pasabajos suave; antes del drop, más cerrado (como escuchado de lejos)
+    d = int(drop_at * SR)
+    for X in (L, R):
+        X[:d] = onepole(X[:d], 0.12)
+        X[d:] = onepole(X[d:], 0.55)
     return np.stack([L, R], axis=1)[: int(total * SR)]
 
 
@@ -874,9 +911,9 @@ def main():
     graph = (
         "[0:a]highpass=f=90,equalizer=f=250:t=q:w=1:g=-3,equalizer=f=3500:t=q:w=1.2:g=5,equalizer=f=9000:t=q:w=1:g=2,"
         "acompressor=threshold=-22dB:ratio=4:attack=4:release=90:makeup=6,aformat=channel_layouts=stereo,asplit=2[v1][v2];"
-        "[1:a][v2]sidechaincompress=threshold=0.03:ratio=5:attack=8:release=260:makeup=1[m];"
+        "[1:a][v2]sidechaincompress=threshold=0.02:ratio=7:attack=6:release=320:makeup=1[m];"
         "[2:a]aformat=channel_layouts=stereo[s];"
-        "[v1][m][s]amix=inputs=3:normalize=0:weights=1.15 0.85 0.8,"
+        "[v1][m][s]amix=inputs=3:normalize=0:weights=1.25 0.6 0.95,"
         "acompressor=threshold=-12dB:ratio=2.5:attack=10:release=150,loudnorm=I=-14:TP=-1.5:LRA=8,alimiter=limit=0.84:level=false,aresample=48000"
     )
     subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", vpath, "-i", mpath, "-i", spath, "-filter_complex", graph, "-ar", "48000", "-ac", "2", wav], check=True)
