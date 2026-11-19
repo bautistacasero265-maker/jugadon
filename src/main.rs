@@ -4819,12 +4819,19 @@ mod app {
         let old = SelectObject(dc, font.into());
         SetTextColor(dc, COLORREF(c));
         let mut t: Vec<u16> = s.encode_utf16().collect();
+        if t.is_empty() {
+            SelectObject(dc, old);
+            return;
+        }
         let mut r = r;
         DrawTextW(dc, &mut t, &mut r, flags | DT_NOPREFIX);
         SelectObject(dc, old);
     }
 
     unsafe fn text_w(dc: HDC, font: HFONT, s: &str) -> i32 {
+        if s.is_empty() {
+            return 0;
+        }
         let old = SelectObject(dc, font.into());
         let t: Vec<u16> = s.encode_utf16().collect();
         let mut sz = SIZE::default();
@@ -5567,7 +5574,9 @@ mod app {
                 }
                 let gr = if label.is_empty() { r } else { rc(r.left + s(10), r.top, r.left + s(38), r.bottom) };
                 glyph_at(dc, glyph, gr, icon, if accent { TEXT } else { ORANGE });
-                text(dc, label, rc(r.left + s(40), r.top, r.right, r.bottom), bold, if b == 0 && !self.trimmed() { MUTED } else { TEXT }, DT_SINGLELINE | DT_VCENTER);
+                if !label.is_empty() {
+                    text(dc, label, rc(r.left + s(40), r.top, r.right, r.bottom), bold, if b == 0 && !self.trimmed() { MUTED } else { TEXT }, DT_SINGLELINE | DT_VCENTER);
+                }
                 self.hits.push((r, VHit::Btn(b)));
                 if self.hover == VHit::Btn(b) && label.is_empty() {
                     // qué hace el botón de solo ícono
