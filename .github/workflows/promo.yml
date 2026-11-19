@@ -19,6 +19,7 @@ concurrency:
 jobs:
   video:
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -28,8 +29,9 @@ jobs:
 
       - name: Instalar ffmpeg, Piper (voz) y librerías
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq ffmpeg fonts-noto-color-emoji
+          # ffmpeg ya viene en la imagen de GitHub; los emojis a color se instalan si el espejo de apt responde
+          command -v ffmpeg || (timeout 300 sudo apt-get update -qq && timeout 300 sudo apt-get install -y -qq ffmpeg)
+          timeout 240 sudo apt-get install -y -qq --no-install-recommends fonts-noto-color-emoji || echo "sin emojis a color"
           # voz neural argentina (edge-tts); Piper queda de respaldo
           pip install -q "edge-tts==7.3.1" "piper-tts==1.2.0" pillow numpy
 
