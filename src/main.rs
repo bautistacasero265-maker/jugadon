@@ -48,6 +48,10 @@ mod logic {
         pub keep_days: u32,
         /// borrar los más viejos si la carpeta pasa de N GB (0 = sin límite)
         pub max_gb: u32,
+        /// cartelito arriba del juego al guardar ("Clip guardado ✓")
+        pub overlay: bool,
+        /// avisar cuando sale una versión nueva
+        pub updates: bool,
     }
 
     impl Config {
@@ -69,6 +73,8 @@ mod logic {
                 sound_style: 0,
                 keep_days: 0,
                 max_gb: 0,
+                overlay: true,
+                updates: true,
             }
         }
 
@@ -107,6 +113,8 @@ mod logic {
                     ("sound_style", Some(n)) if n <= 2 => c.sound_style = n,
                     ("keep_days", Some(n)) if n <= 3650 => c.keep_days = n,
                     ("max_gb", Some(n)) if n <= 10_000 => c.max_gb = n,
+                    ("overlay", Some(n)) if n <= 1 => c.overlay = n == 1,
+                    ("updates", Some(n)) if n <= 1 => c.updates = n == 1,
                     _ => {}
                 }
             }
@@ -120,7 +128,7 @@ mod logic {
 
         pub fn serialize(&self) -> String {
             format!(
-                "version=4\nseconds={}\nfps={}\nquality={}\nclip_key={}\nclip_mods={}\nshot_key={}\nshot_mods={}\nfolder={}\nencoder={}\nbg={}\nrec_key={}\nrec_mods={}\nmic={}\nsound={}\ngpu_only={}\nprobed={}\nsound_style={}\nkeep_days={}\nmax_gb={}\n",
+                "version=4\nseconds={}\nfps={}\nquality={}\nclip_key={}\nclip_mods={}\nshot_key={}\nshot_mods={}\nfolder={}\nencoder={}\nbg={}\nrec_key={}\nrec_mods={}\nmic={}\nsound={}\ngpu_only={}\nprobed={}\nsound_style={}\nkeep_days={}\nmax_gb={}\noverlay={}\nupdates={}\n",
                 self.secs,
                 self.fps,
                 self.height,
@@ -139,7 +147,9 @@ mod logic {
                 self.probed,
                 self.sound_style,
                 self.keep_days,
-                self.max_gb
+                self.max_gb,
+                self.overlay as u8,
+                self.updates as u8
             )
         }
     }
@@ -350,8 +360,20 @@ mod logic {
         Window(u64),
     }
 
-    /// Argumentos de grabación. audio = (Hz, canales) de PCM f32 por stdin.
-    pub fn record_args(enc: usize, height: u32, fps: u32, src: Source, audio: Option<(u32, u16)>, out: Out) -> Vec<String> {
+    /// Pistas de audio con el micrófono aparte. Por stdin llegan 2×ch canales: [juego…, micrófono…].
+    /// Pista 0 = juego + voz (la que suena en cualquier reproductor, Discord o el navegador),
+    /// pista 1 = solo juego, pista 2 = solo micrófono (mono): con eso se rearma la mezcla después
+    /// sin volver a grabar. Cuesta casi nada: el AAC "fast" es liviano y el video no se toca.
+    pub fn split_filter(ch: u16) -> String {
+        if ch == 1 {
+            "[1:a]asplit=3[x][y][z];[x]pan=mono|c0=c0+c1,asoftclip=type=hard[mix];[y]pan=mono|c0=c0[game];[z]pan=mono|c0=c1[mic]".into()
+        } else {
+            "[1:a]asplit=3[x][y][z];[x]pan=stereo|c0=c0+c2|c1=c1+c3,asoftclip=type=hard[mix];[y]pan=stereo|c0=c0|c1=c1[game];[z]pan=mono|c0=0.5*c2+0.5*c3[mic]".into()
+        }
+    }
+
+    /// Argumentos de grabación. audio = (Hz, canales, ¿micrófono en pista aparte?) de PCM f32 por stdin.
+    pub fn record_args(enc: usize, height: u32, fps: u32, src: Source, audio: Option<(u32, u16, bool)>, out: Out) -> Vec<String> {
         let e = &ENCODERS[enc];
         let (height, fps) = effective(enc, height, fps);
         let br = bitrate_kbit(height, fps);
@@ -376,17 +398,26 @@ mod logic {
                 Source::Window(h) => format!("gfxcapture=hwnd={h}:max_framerate={fps}:capture_cursor=1"),
             });
         }
-        if let Some((rate, ch)) = audio {
+        let split = matches!(audio, Some((_, ch, true)) if ch <= 2);
+        if let Some((rate, ch, _)) = audio {
             // sin probesize/analyzeduration ffmpeg lee ~5 s de audio antes de arrancar el video (desfase)
             a.extend(s(&["-thread_queue_size", "128", "-probesize", "32", "-analyzeduration", "0", "-f", "f32le", "-ar"]));
             a.push(rate.to_string());
             a.push("-ac".into());
-            a.push(ch.to_string());
-            a.extend(s(&["-i", "pipe:0", "-map", "0:v", "-map", "1:a"]));
+            a.push((if split { ch * 2 } else { ch }).to_string());
+            a.extend(s(&["-i", "pipe:0"]));
+            if split {
+                a.extend(s(&["-filter_complex_threads", "1", "-filter_complex"]));
+                a.push(format!("[0:v]{vf}[v];{}", split_filter(ch)));
+                a.extend(s(&["-map", "[v]", "-map", "[mix]", "-map", "[game]", "-map", "[mic]"]));
+            } else {
+                a.extend(s(&["-map", "0:v", "-map", "1:a", "-vf"]));
+                a.push(vf);
+            }
         } else {
-            a.extend(s(&["-map", "0:v"]));
+            a.extend(s(&["-map", "0:v", "-vf"]));
+            a.push(vf);
         }
-        a.extend(["-vf".into(), vf]);
         if matches!(src, Source::Window(_)) && !e.gdi {
             // la captura de ventana manda cuadros solo cuando la ventana cambia: video a fps fijos
             a.extend(["-fps_mode".into(), "cfr".into(), "-r".into(), fps.to_string()]);
@@ -411,6 +442,9 @@ mod logic {
         if audio.is_some() {
             // codificador AAC "fast": mucho menos CPU que el de fábrica, misma calidad para juegos/voz
             a.extend(s(&["-c:a", "aac", "-aac_coder", "fast", "-b:a", "128k"]));
+            if split {
+                a.extend(s(&["-b:a:2", "64k"]));
+            }
         }
         match out {
             Out::Segments { secs, dir } => {
@@ -540,13 +574,217 @@ mod logic {
     pub fn discord_args(enc: usize, input: &str, dur_secs: u32, out: &str) -> Vec<String> {
         let e = &ENCODERS[enc];
         let (h, v) = discord_plan(dur_secs);
-        let mut a = s(&["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-hwaccel", "auto", "-i", input, "-map", "0:v:0", "-map", "0:a?", "-vf"]);
+        let mut a = s(&["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-hwaccel", "auto", "-i", input, "-map", "0:v:0", "-map", "0:a:0?", "-vf"]);
         a.push(format!("scale=-2:min({h}\\,trunc(ih/2)*2):flags=bicubic,format=nv12"));
         a.extend(s(&["-r", "30", "-c:v", e.codec]));
         a.extend(s(e.opts));
         a.extend(["-b:v".into(), format!("{v}k"), "-maxrate".into(), format!("{v}k"), "-bufsize".into(), format!("{}k", v * 2)]);
         a.extend(s(&["-g", "60", "-bf", "0", "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", out]));
         a
+    }
+
+    #[cfg(test)]
+    pub fn s_test(v: &[&str]) -> Vec<String> {
+        s(v)
+    }
+
+    /// Lo que ffmpeg cuenta de un video (de `ffmpeg -i archivo`, sin ffprobe).
+    #[derive(Clone, Debug, Default, PartialEq)]
+    pub struct Info {
+        pub audio: usize,
+        pub dur: f64,
+        pub w: u32,
+        pub h: u32,
+        pub fps: f64,
+    }
+
+    pub fn parse_info(text: &str) -> Info {
+        let mut i = Info::default();
+        if let Some(p) = text.find("Duration: ") {
+            let t = text[p + 10..].split(',').next().unwrap_or("");
+            let parts: Vec<f64> = t.trim().split(':').filter_map(|x| x.parse().ok()).collect();
+            if parts.len() == 3 {
+                i.dur = parts[0] * 3600.0 + parts[1] * 60.0 + parts[2];
+            }
+        }
+        for line in text.lines().filter(|l| l.contains("Stream #")) {
+            if line.contains("Audio:") {
+                i.audio += 1;
+            } else if line.contains("Video:") && i.w == 0 {
+                for tok in line.split([' ', ',']) {
+                    if let Some((a, b)) = tok.split_once('x') {
+                        if let (Ok(w), Ok(h)) = (a.parse::<u32>(), b.parse::<u32>()) {
+                            if w >= 16 && h >= 16 {
+                                (i.w, i.h) = (w, h);
+                                break;
+                            }
+                        }
+                    }
+                }
+                let toks: Vec<&str> = line.split([' ', ',']).filter(|t| !t.is_empty()).collect();
+                if let Some(k) = toks.iter().position(|t| *t == "fps") {
+                    i.fps = k.checked_sub(1).and_then(|k| toks[k].parse().ok()).unwrap_or(0.0);
+                }
+            }
+        }
+        i
+    }
+
+    /// Para leer la info de un video: ffmpeg sin salida termina con error, pero escribe la info.
+    pub fn info_args(input: &str) -> Vec<String> {
+        s(&["-hide_banner", "-nostdin", "-i", input])
+    }
+
+    /// Video vertical (1080×1920) para TikTok / Reels / Shorts, con la placa si se puede.
+    /// blur = false: se recorta el centro. blur = true: entra todo el video y arriba y abajo
+    /// va el mismo video desenfocado (el desenfoque se hace chiquito, 270×480: casi no gasta).
+    pub fn vertical_args(enc: usize, input: &str, blur: bool, out: &str) -> Vec<String> {
+        let e = &ENCODERS[enc];
+        let mut a = s(&["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-hwaccel", "auto", "-i", input]);
+        if blur {
+            a.push("-filter_complex".into());
+            a.push(
+                "[0:v:0]split=2[a][b];[a]scale=270:480:force_original_aspect_ratio=increase:flags=fast_bilinear,crop=270:480,boxblur=8:2,scale=1080:1920:flags=fast_bilinear[bg];\
+                 [b]scale=1080:1920:force_original_aspect_ratio=decrease:flags=bicubic,setsar=1[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2,format=nv12[v]"
+                    .into(),
+            );
+            a.extend(s(&["-map", "[v]"]));
+        } else {
+            a.extend(s(&["-map", "0:v:0", "-vf"]));
+            a.push(
+                "crop=min(iw\\,trunc(ih*9/16/2)*2):ih,scale=1080:1920:force_original_aspect_ratio=decrease:flags=bicubic,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1,format=nv12".into(),
+            );
+        }
+        a.extend(s(&["-map", "0:a:0?", "-c:v", e.codec]));
+        a.extend(s(e.opts));
+        a.extend(s(&["-b:v", "8000k", "-maxrate", "8000k", "-bufsize", "16000k", "-g", "60", "-bf", "0", "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", out]));
+        a
+    }
+
+    /// Juntar varios clips en uno (en el orden dado). Todo queda del tamaño y los fps del primero;
+    /// si a alguno le falta el audio, se pone silencio en su lugar.
+    pub fn join_args(enc: usize, inputs: &[(String, Info)], out: &str) -> Vec<String> {
+        let e = &ENCODERS[enc];
+        let first = inputs.first().map(|x| x.1.clone()).unwrap_or_default();
+        let even = |v: u32, d: u32| if v >= 16 { v & !1 } else { d };
+        let (w, h) = (even(first.w, 1280), even(first.h, 720));
+        let fps = if first.fps >= 20.0 { (first.fps.round() as u32).min(60) } else { 30 };
+        let mut a = s(&["-hide_banner", "-loglevel", "error", "-nostdin", "-y"]);
+        for (p, _) in inputs {
+            a.extend(s(&["-hwaccel", "auto", "-i", p]));
+        }
+        let mut extra = inputs.len();
+        let mut f = String::new();
+        let mut silent = Vec::new();
+        for (k, (_, inf)) in inputs.iter().enumerate() {
+            f += &format!("[{k}:v:0]scale={w}:{h}:force_original_aspect_ratio=decrease:flags=bicubic,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={fps},format=yuv420p[v{k}];");
+            let src = if inf.audio > 0 {
+                format!("[{k}:a:0]")
+            } else {
+                silent.push(inf.dur.max(0.5));
+                extra += 1;
+                format!("[{}:a]", extra - 1)
+            };
+            f += &format!("{src}aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a{k}];");
+        }
+        for d in silent {
+            a.extend(s(&["-f", "lavfi", "-t"]));
+            a.push(format!("{d:.2}"));
+            a.extend(s(&["-i", "anullsrc=r=48000:cl=stereo"]));
+        }
+        for k in 0..inputs.len() {
+            f += &format!("[v{k}][a{k}]");
+        }
+        f += &format!("concat=n={}:v=1:a=1[cv][ca];[cv]format=nv12[v]", inputs.len());
+        a.push("-filter_complex".into());
+        a.push(f);
+        a.extend(s(&["-map", "[v]", "-map", "[ca]", "-c:v", e.codec]));
+        a.extend(s(e.opts));
+        let br = bitrate_kbit(h.min(720), fps) * if h > 720 { 2 } else { 1 };
+        a.extend(["-b:v".into(), format!("{br}k"), "-maxrate".into(), format!("{br}k"), "-bufsize".into(), format!("{}k", br * 2), "-g".into(), (fps * 2).to_string()]);
+        a.extend(s(&["-bf", "0", "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", out]));
+        a
+    }
+
+    /// Opciones de sonido para clips grabados con el micrófono aparte (pista 1 = juego, 2 = micrófono).
+    pub const SOUND_MODES: [(&str, &str); 5] = [
+        ("Sacar mi voz (solo el juego)", "sinmic"),
+        ("Solo mi voz (sin el juego)", "solomic"),
+        ("Mi voz más fuerte", "vozfuerte"),
+        ("Mi voz más baja", "vozbaja"),
+        ("El juego más bajo", "juegobajo"),
+    ];
+
+    /// Rearma el sonido sin tocar el video (copia: instantáneo).
+    pub fn sound_args(input: &str, mode: usize, out: &str) -> Vec<String> {
+        let mut a = s(&["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i", input, "-map", "0:v:0"]);
+        let mix = |g: f32, m: f32| format!("[0:a:1]volume={g}[g];[0:a:2]aformat=channel_layouts=stereo,volume={m}[m];[g][m]amix=inputs=2:normalize=0:duration=first,asoftclip=type=hard[a]");
+        match mode {
+            0 | 1 => {
+                a.extend(s(&["-map", if mode == 0 { "0:a:1" } else { "0:a:2" }, "-c", "copy"]));
+            }
+            _ => {
+                let (g, m) = match mode {
+                    2 => (0.55, 1.7),
+                    3 => (1.0, 0.4),
+                    _ => (0.3, 1.0),
+                };
+                a.push("-filter_complex".into());
+                a.push(mix(g, m));
+                a.extend(s(&["-map", "[a]", "-c:v", "copy", "-c:a", "aac", "-b:a", "160k"]));
+            }
+        }
+        a.extend(s(&["-movflags", "+faststart", out]));
+        a
+    }
+
+    pub const REPO_URL: &str = "https://github.com/bautistacasero265-maker/jugadon";
+
+    /// curl.exe a la API de GitHub: la última versión publicada (un pedido chico, una vez al abrir y cada 12 h).
+    pub fn update_args() -> Vec<String> {
+        s(&[
+            "-sS",
+            "-f",
+            "-L",
+            "--connect-timeout",
+            "10",
+            "--max-time",
+            "20",
+            "-A",
+            "Jugadon/1.0",
+            "-H",
+            "Accept: application/vnd.github+json",
+            "https://api.github.com/repos/bautistacasero265-maker/jugadon/releases/latest",
+        ])
+    }
+
+    /// Número de versión de la respuesta ("tag_name": "v1.0.45" -> 45).
+    pub fn latest_version(json: &str) -> Option<u32> {
+        let i = json.find("\"tag_name\"")?;
+        let rest = &json[i + 10..];
+        let rest = &rest[rest.find('"')? + 1..];
+        let tag = &rest[..rest.find('"')?];
+        tag.strip_prefix("v1.0.")?.parse().ok()
+    }
+
+    /// ¿Hay una versión más nueva que esta? (las compilaciones locales "dev" no avisan)
+    pub fn is_newer(build: &str, latest: u32) -> bool {
+        build.parse::<u32>().is_ok_and(|b| latest > b)
+    }
+
+    /// Mezcla dos fuentes en canales separados: cada cuadro queda [a (ch canales), b (ch canales)].
+    /// Lo que falta (fuente callada o atrasada) va en silencio; lo usado sale de las colas.
+    pub fn interleave2(out: &mut [f32], a: &mut Vec<f32>, b: &mut Vec<f32>, ch: usize) {
+        let frames = out.len() / (2 * ch);
+        for (i, f) in out.chunks_exact_mut(2 * ch).enumerate() {
+            for c in 0..ch {
+                f[c] = a.get(i * ch + c).copied().unwrap_or(0.0);
+                f[ch + c] = b.get(i * ch + c).copied().unwrap_or(0.0);
+            }
+        }
+        let (na, nb) = (a.len().min(frames * ch), b.len().min(frames * ch));
+        a.drain(..na);
+        b.drain(..nb);
     }
 
     /// Nombre nuevo al renombrar: se conserva el tipo y la fecha ("clip_AAAA-…") y se agrega el título.
@@ -806,6 +1044,9 @@ mod logic {
             // tecla de grabar repetida -> defaults
             let c = Config::parse("rec_key=120\n", "F".into());
             assert_eq!((c.clip.vk, c.shot.vk, c.rec.vk), (VK_F9, VK_F10, VK_F8));
+            assert!(d.overlay && d.updates);
+            let c = Config::parse(&Config { overlay: false, updates: false, ..Config::defaults("F".into()) }.serialize(), "F".into());
+            assert!(!c.overlay && !c.updates);
         }
 
         #[test]
@@ -914,8 +1155,84 @@ mod logic {
         }
 
         #[test]
+        fn mic_on_its_own_track() {
+            let a = record_args(0, 720, 30, Source::Screen, Some((48000, 2, true)), Out::Segments { secs: 30, dir: "D" }).join(" ");
+            assert!(a.contains("-ac 4 -i pipe:0 -filter_complex_threads 1 -filter_complex [0:v]scale_d3d11="), "{a}");
+            assert!(a.contains("[v];[1:a]asplit=3"), "{a}");
+            assert!(a.contains("-map [v] -map [mix] -map [game] -map [mic]"), "{a}");
+            assert!(a.contains("-b:a 128k -b:a:2 64k"), "{a}");
+            assert!(!a.contains(" -vf "), "{a}");
+            // sin micrófono (o con 5.1) queda como siempre
+            let b = record_args(0, 720, 30, Source::Screen, Some((48000, 6, true)), Out::Segments { secs: 30, dir: "D" }).join(" ");
+            assert!(b.contains("-ac 6 -i pipe:0 -map 0:v -map 1:a -vf"), "{b}");
+            let mono = split_filter(1);
+            assert!(mono.contains("pan=mono|c0=c0+c1") && mono.contains("pan=mono|c0=c1[mic]"));
+        }
+
+        #[test]
+        fn interleave_two_sources() {
+            let mut out = vec![9.0; 8];
+            let mut a = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+            let mut b = vec![-1.0, -2.0];
+            interleave2(&mut out, &mut a, &mut b, 2);
+            assert_eq!(out, vec![1.0, 2.0, -1.0, -2.0, 3.0, 4.0, 0.0, 0.0]);
+            assert_eq!(a, vec![5.0, 6.0]);
+            assert!(b.is_empty());
+        }
+
+        #[test]
+        fn video_info() {
+            let t = "Input #0, mov,mp4,m4a,3gp,3g2,mj2, from 'clip.mp4':\n  Duration: 00:01:02.50, start: 0.000000, bitrate: 6000 kb/s\n  Stream #0:0[0x1](und): Video: h264 (High) (avc1 / 0x31637661), yuv420p(tv, progressive), 1280x720 [SAR 1:1 DAR 16:9], 5800 kb/s, 60 fps, 60 tbr, 15360 tbn (default)\n  Stream #0:1[0x2](und): Audio: aac (LC) (mp4a / 0x6134706D), 48000 Hz, stereo, fltp, 128 kb/s (default)\n  Stream #0:2[0x3](und): Audio: aac (LC), 48000 Hz, stereo, fltp, 128 kb/s\n  Stream #0:3[0x4](und): Audio: aac (LC), 48000 Hz, mono, fltp, 64 kb/s\nAt least one output file must be specified\n";
+            let i = parse_info(t);
+            assert_eq!(i, Info { audio: 3, dur: 62.5, w: 1280, h: 720, fps: 60.0 });
+            let j = parse_info("Duration: 00:00:09.97, start\n  Stream #0:0: Video: h264, nv12, 404x720, 29.97 fps, 30 tbr\n");
+            assert_eq!((j.audio, j.w, j.h, j.fps), (0, 404, 720, 29.97));
+            assert_eq!(parse_info("basura"), Info::default());
+        }
+
+        #[test]
+        fn vertical_and_join() {
+            let v = vertical_args(0, "in.mp4", false, "out.mp4").join(" ");
+            assert!(v.contains("-vf crop=min(iw\\,trunc(ih*9/16/2)*2):ih,scale=1080:1920"), "{v}");
+            assert!(v.contains("-map 0:a:0? -c:v h264_nvenc"), "{v}");
+            let b = vertical_args(6, "in.mp4", true, "out.mp4").join(" ");
+            assert!(b.contains("boxblur") && b.contains("overlay=(W-w)/2:(H-h)/2") && b.contains("-map [v]") && b.contains("-c:v h264_mf"), "{b}");
+            let a = Info { audio: 3, dur: 10.0, w: 1280, h: 720, fps: 30.0 };
+            let n = Info { audio: 0, dur: 4.0, w: 854, h: 480, fps: 60.0 };
+            let j = join_args(0, &[("a.mp4".into(), a.clone()), ("b.mp4".into(), n), ("c.mp4".into(), a)], "o.mp4").join(" ");
+            assert!(j.contains("-hwaccel auto -i a.mp4 -hwaccel auto -i b.mp4 -hwaccel auto -i c.mp4 -f lavfi -t 4.00 -i anullsrc"), "{j}");
+            assert!(j.contains("[1:v:0]scale=1280:720") && j.contains("[3:a]aresample") && j.contains("[2:a:0]aresample"), "{j}");
+            assert!(j.contains("[v0][a0][v1][a1][v2][a2]concat=n=3:v=1:a=1"), "{j}");
+            assert!(j.contains("-b:v 6000k") && j.ends_with("o.mp4"), "{j}");
+        }
+
+        #[test]
+        fn sound_modes() {
+            let a = sound_args("i.mp4", 0, "o.mp4").join(" ");
+            assert!(a.contains("-map 0:v:0 -map 0:a:1 -c copy"), "{a}");
+            assert!(sound_args("i.mp4", 1, "o.mp4").join(" ").contains("-map 0:a:2 -c copy"));
+            let m = sound_args("i.mp4", 2, "o.mp4").join(" ");
+            assert!(m.contains("[0:a:1]volume=0.55[g];[0:a:2]aformat=channel_layouts=stereo,volume=1.7[m]") && m.contains("-c:v copy -c:a aac"), "{m}");
+            for k in 0..SOUND_MODES.len() {
+                assert!(sound_args("i", k, "o").last().unwrap() == "o");
+            }
+        }
+
+        #[test]
+        fn update_check() {
+            let j = r#"{"url":"x","tag_name": "v1.0.52","name":"Jugadón 1.0.52"}"#;
+            assert_eq!(latest_version(j), Some(52));
+            assert_eq!(latest_version(r#"{"tag_name":"promo-v7"}"#), None);
+            assert_eq!(latest_version("{}"), None);
+            assert!(is_newer("45", 52));
+            assert!(!is_newer("52", 52));
+            assert!(!is_newer("dev", 99));
+            assert!(update_args().last().unwrap().ends_with("/releases/latest"));
+        }
+
+        #[test]
         fn record_args_gpu_with_audio() {
-            let a = record_args(0, 720, 60, Source::Screen, Some((48000, 2)), Out::Segments { secs: 30, dir: "C:\\T\\jugadon_buf" }).join(" ");
+            let a = record_args(0, 720, 60, Source::Screen, Some((48000, 2, false)), Out::Segments { secs: 30, dir: "C:\\T\\jugadon_buf" }).join(" ");
             assert!(a.contains("-f lavfi -i ddagrab=framerate=60:draw_mouse=1"));
             assert!(a.starts_with("-hide_banner -loglevel warning -nostats -filter_threads 1 -f lavfi"));
             assert!(a.contains("-thread_queue_size 128 -probesize 32 -analyzeduration 0 -f f32le -ar 48000 -ac 2 -i pipe:0 -map 0:v -map 1:a"));
@@ -1056,7 +1373,7 @@ mod win_tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let dirs = dir.to_string_lossy().into_owned();
-        let mut args = logic::record_args(11, 720, 30, logic::Source::Screen, Some((48000, 2)), logic::Out::Segments { secs: 6, dir: &dirs });
+        let mut args = logic::record_args(11, 720, 30, logic::Source::Screen, Some((48000, 2, false)), logic::Out::Segments { secs: 6, dir: &dirs });
         for a in args.iter_mut() {
             if a.starts_with("ddagrab=") {
                 *a = "testsrc2=size=1920x1080:rate=30,realtime".into();
@@ -1118,6 +1435,135 @@ mod win_tests {
         assert_eq!(durs.len(), 2, "{info}");
         assert!(durs.iter().all(|d| (5.0..=9.0).contains(d)), "duración rara: {durs:?}");
         assert!((durs[0] - durs[1]).abs() < 0.5, "audio y video desparejos: {durs:?}");
+    }
+}
+
+/// Corre también en Linux (con RCLIP_FFMPEG=/usr/bin/ffmpeg) para probar los filtros antes de subir.
+#[cfg(test)]
+mod win_tests_tools {
+    use crate::logic;
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    fn probe(ff: &str, f: &str) -> String {
+        let probe = std::path::Path::new(ff).with_file_name(if cfg!(windows) { "ffprobe.exe" } else { "ffprobe" });
+        let o = Command::new(probe)
+            .args(["-v", "error", "-show_entries", "stream=codec_type,width,height,channels:format=duration", "-of", "default=nw=1", f])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&o.stdout).to_string()
+    }
+
+    fn info(ff: &str, f: &str) -> logic::Info {
+        let o = Command::new(ff).args(logic::info_args(f)).output().unwrap();
+        logic::parse_info(&String::from_utf8_lossy(&o.stderr))
+    }
+
+    /// Volumen medio en dB de la (única) pista de audio.
+    fn mean_db(ff: &str, f: &str) -> f64 {
+        let o = Command::new(ff).args(["-hide_banner", "-nostdin", "-i", f, "-map", "0:a:0", "-af", "volumedetect", "-f", "null", "-"]).output().unwrap();
+        let t = String::from_utf8_lossy(&o.stderr).to_string();
+        t.lines().find_map(|l| l.split("mean_volume:").nth(1)).and_then(|v| v.trim().trim_end_matches("dB").trim().parse().ok()).unwrap_or(-99.0)
+    }
+
+    fn run(ff: &str, args: &[String]) {
+        let st = Command::new(ff).args(args).status().unwrap();
+        assert!(st.success(), "falló: {}", args.join(" "));
+    }
+
+    /// Graba con el micrófono en pista aparte (juego = 440 Hz, voz = 880 Hz) y prueba
+    /// las opciones de sonido, el video vertical y juntar clips, todo con x264 (el servidor no tiene placa).
+    #[test]
+    fn mic_tracks_vertical_join() {
+        let Ok(ff) = std::env::var("RCLIP_FFMPEG") else {
+            eprintln!("RCLIP_FFMPEG no definido: se saltea");
+            return;
+        };
+        let tmp = std::env::temp_dir();
+        let p = |n: &str| tmp.join(n).to_string_lossy().into_owned();
+        let ts = p("jugadon_test_mic.ts");
+        let mut args = logic::record_args(11, 720, 30, logic::Source::Screen, Some((48000, 2, true)), logic::Out::File(&ts));
+        for a in args.iter_mut() {
+            if a.starts_with("ddagrab=") {
+                *a = "testsrc2=size=1280x720:rate=30,realtime".into();
+            } else if a.contains("hwdownload,format=bgra,") {
+                *a = a.replacen("hwdownload,format=bgra,", "", 1);
+            }
+        }
+        eprintln!("args: {}", args.join(" "));
+        let mut child = Command::new(&ff).args(&args).stdin(Stdio::piped()).stdout(Stdio::null()).spawn().unwrap();
+        let mut w = child.stdin.take().unwrap();
+        let t0 = Instant::now();
+        let mut frames = 0u64;
+        while t0.elapsed() < Duration::from_secs(6) {
+            let mut buf = Vec::with_capacity(4800 * 4 * 4);
+            for i in 0..4800u64 {
+                let t = (frames + i) as f32 / 48000.0;
+                let game = (t * 440.0 * std::f32::consts::TAU).sin() * 0.3;
+                let mic = (t * 880.0 * std::f32::consts::TAU).sin() * 0.3;
+                for v in [game, game, mic, mic] {
+                    buf.extend_from_slice(&v.to_le_bytes());
+                }
+            }
+            w.write_all(&buf).expect("ffmpeg dejó de leer el audio");
+            frames += 4800;
+            let due = Duration::from_micros(frames * 1_000_000 / 48000);
+            if let Some(d) = due.checked_sub(t0.elapsed()) {
+                std::thread::sleep(d);
+            }
+        }
+        drop(w);
+        let _ = child.kill();
+        let _ = child.wait();
+        let clip = p("jugadon_test_mic.mp4");
+        run(&ff, &logic::remux_args(&ts, &clip));
+        let i = info(&ff, &clip);
+        eprintln!("clip: {i:?}\n{}", probe(&ff, &clip));
+        assert_eq!(i.audio, 3, "tienen que quedar 3 pistas (juego+voz, juego, voz)");
+        assert!(i.dur > 3.0, "{i:?}");
+        let pr = probe(&ff, &clip);
+        assert_eq!(pr.matches("channels=2").count(), 2, "{pr}");
+        assert_eq!(pr.matches("channels=1").count(), 1, "{pr}");
+
+        // cada opción de sonido: una sola pista, con sonido
+        let mut db = Vec::new();
+        for (k, (label, tag)) in logic::SOUND_MODES.iter().enumerate() {
+            let out = p(&format!("jugadon_test_{tag}.mp4"));
+            run(&ff, &logic::sound_args(&clip, k, &out));
+            let o = info(&ff, &out);
+            let v = mean_db(&ff, &out);
+            eprintln!("{label}: {o:?} volumen medio {v} dB");
+            assert_eq!(o.audio, 1, "{label}");
+            assert!(o.w == 1280 && o.dur > 3.0, "{label}: {o:?}");
+            assert!(v > -30.0, "{label}: quedó sin sonido ({v} dB)");
+            db.push(v);
+        }
+        // "mi voz más fuerte" suena más que "mi voz más baja"... y "el juego más bajo" menos que el original
+        assert!(db[2] > db[3], "{db:?}");
+
+        // vertical (recortado y con fondo)
+        for blur in [false, true] {
+            let out = p(&format!("jugadon_test_vertical{}.mp4", blur as u8));
+            run(&ff, &logic::vertical_args(11, &clip, blur, &out));
+            let o = info(&ff, &out);
+            eprintln!("vertical {blur}: {o:?}");
+            assert!(o.w == 1080 && o.h == 1920 && o.audio == 1 && o.dur > 3.0, "{o:?}");
+        }
+
+        // juntar: el clip de 3 pistas + uno sin audio (lleva silencio) + el clip otra vez
+        let mute = p("jugadon_test_mute.mp4");
+        run(&ff, &logic::s_test(&["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=854x480:rate=60", "-t", "2", "-c:v", "libx264", "-preset", "ultrafast", &mute]));
+        let inputs: Vec<(String, logic::Info)> = [&clip, &mute, &clip].iter().map(|f| (f.to_string(), info(&ff, f))).collect();
+        let total: f64 = inputs.iter().map(|x| x.1.dur).sum();
+        let out = p("jugadon_test_montaje.mp4");
+        let ja = logic::join_args(11, &inputs, &out);
+        eprintln!("juntar: {}", ja.join(" "));
+        run(&ff, &ja);
+        let o = info(&ff, &out);
+        eprintln!("montaje: {o:?} (suma {total:.2})");
+        assert!(o.w == 1280 && o.h == 720 && o.audio == 1, "{o:?}");
+        assert!((o.dur - total).abs() < 1.0, "duración {} vs {total}", o.dur);
     }
 }
 
@@ -1240,7 +1686,7 @@ mod win_tests_overhead {
             .map(|x| x.to_string())
             .collect();
         // mismos argumentos de audio y salida que la app
-        let app = crate::logic::record_args(0, 720, 30, crate::logic::Source::Screen, Some((48000, 2)), crate::logic::Out::Segments { secs: 30, dir: "D" });
+        let app = crate::logic::record_args(0, 720, 30, crate::logic::Source::Screen, Some((48000, 2, false)), crate::logic::Out::Segments { secs: 30, dir: "D" });
         let ai = app.iter().position(|x| x == "-thread_queue_size").unwrap();
         args.extend(app[ai..ai + 14].iter().cloned()); // -thread_queue_size ... -i pipe:0
         args.extend(["-map", "0:v", "-map", "1:a", "-c:v", "libx264", "-preset", "ultrafast", "-g", "60"].iter().map(|x| x.to_string()));
@@ -1318,6 +1764,8 @@ mod app {
     const WM_PROBED: u32 = WM_APP + 4;
     /// terminó de subir un clip: lParam = Box<(nombre, link o error, vence, permanente)>
     const WM_LINK: u32 = WM_APP + 5;
+    /// terminó de buscar versión nueva (wParam = número de la última publicada, 0 = no se supo)
+    const WM_UPDATE: u32 = WM_APP + 6;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     // El juego siempre gana la CPU: grabar en "debajo de lo normal", guardar/capturar en "baja".
     const BELOW_NORMAL: u32 = 0x0000_4000;
@@ -1326,6 +1774,8 @@ mod app {
     const TIMER_BIND: usize = 2;
     /// chequeo 1,5 s después de cambiar de ventana (el juego suele pasar a pantalla completa un toque después)
     const TIMER_FG: usize = 3;
+    /// buscar versión nueva: a los 20 s de abrir y después cada 12 h
+    const TIMER_UPDATE: usize = 7;
     const RUN_KEY: PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
     const QUICK_DEATH: Duration = Duration::from_secs(5);
     /// Cuánto sigue grabando después de salir del juego (alt-tab corto no pierde el buffer).
@@ -1398,6 +1848,10 @@ mod app {
         last_trim: Option<Instant>,
         last_file: Option<String>,
         sound: Vec<u8>,
+        /// versión nueva publicada (número de compilación), si hay
+        update: Option<u32>,
+        /// el último globito es el de la versión nueva (tocarlo abre la descarga)
+        click_update: std::cell::Cell<bool>,
     }
 
     /// Cuánto duró de verdad un proceso que ya terminó (desde que arrancó hasta que salió).
@@ -1607,6 +2061,28 @@ mod app {
     }
 
     /// Pasa la grabación .ts a .mp4 (prioridad baja) y avisa. Si falla, deja el .ts.
+    /// Lo que ffmpeg cuenta de un video (pistas de audio, duración, tamaño, fps).
+    fn video_info(ffmpeg: &Path, file: &str) -> logic::Info {
+        let mut cmd = Command::new(ffmpeg);
+        cmd.args(logic::info_args(file)).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
+        match spawn_hidden(&mut cmd, IDLE).and_then(|c| c.wait_with_output()) {
+            Ok(o) => logic::parse_info(&String::from_utf8_lossy(&o.stderr)),
+            Err(_) => logic::Info::default(),
+        }
+    }
+
+    /// Nombre libre para una copia: "clip_X_tag.mp4", o "clip_X_tag2.mp4" si ya existe.
+    fn free_name(f: &Path, tag: &str) -> PathBuf {
+        let name = f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let mut out = f.with_file_name(logic::derived_name(&name, tag));
+        let mut n = 2;
+        while out.exists() && n < 1000 {
+            out = f.with_file_name(logic::derived_name(&name, &format!("{tag}{n}")));
+            n += 1;
+        }
+        out
+    }
+
     fn remux_in_background(ffmpeg: PathBuf, log: PathBuf, ts: PathBuf, out: PathBuf, msg: String) {
         std::thread::spawn(move || {
             let args = logic::remux_args(&ts.to_string_lossy(), &out.to_string_lossy());
@@ -1746,6 +2222,7 @@ mod app {
         }
 
         fn notify(&self, msg: &str, warn: bool) {
+            self.click_update.set(false);
             let mut n = self.nid();
             n.uFlags = NIF_INFO;
             copy_wide(&mut n.szInfoTitle, "Jugadón");
@@ -1804,9 +2281,9 @@ mod app {
                 Some(a) => crate::audio::small_pipe().map(|p| (a, p)),
                 None => None,
             };
-            let fmt = audio.as_ref().map(|(a, _)| (a.rate, a.channels));
+            let fmt = audio.as_ref().map(|(a, _)| (a.rate, a.channels, a.split));
             let args = logic::record_args(enc, self.cfg.height, self.cfg.fps, src, fmt, out);
-            let audio_desc = fmt.map_or("no".to_string(), |f| format!("{} Hz, {} canales", f.0, f.1));
+            let audio_desc = fmt.map_or("no".to_string(), |f| format!("{} Hz, {} canales{}", f.0, f.1, if f.2 { ", micrófono en pista aparte" } else { "" }));
             log_line(&self.log_path, &format!("iniciando {} {} fps (audio: {audio_desc}, fuente: {src:?})", ENCODERS[enc].label, self.cfg.fps));
             let mut cmd = Command::new(&self.ffmpeg);
             cmd.args(&args).stdout(Stdio::null()).stderr(log_stdio(&self.log_path));
@@ -1879,6 +2356,7 @@ mod app {
             self.play_sound();
             let what = self.manual.as_ref().map(|m| m.what.clone()).unwrap_or_default();
             self.notify(&format!("Grabando {what}. Apretá {} para frenar y guardar.", hk(self.cfg.rec)), false);
+            self.show_overlay("Grabando", &format!("{} para frenar y guardar", hk(self.cfg.rec)), 1);
             self.update_tip();
         }
 
@@ -2527,6 +3005,9 @@ mod app {
                 };
                 let t = wide(&self.status());
                 let _ = AppendMenuW(m, MF_STRING | MF_GRAYED, 0, PCWSTR(t.as_ptr()));
+                if let Some(v) = self.update {
+                    add(m, 51, &format!("⬆ Bajar la versión nueva (v1.0.{v})"), false);
+                }
                 sep(m);
                 add(m, 5, "Ver mis clips…", false);
                 add(m, 1, &format!("Guardar clip\t{}", hk(self.cfg.clip)), false);
@@ -2599,6 +3080,9 @@ mod app {
                 add(o, 30, "Tecla de clip…", false);
                 add(o, 31, "Tecla de captura…", false);
                 add(o, 32, "Tecla de grabar/frenar…", false);
+                sep(o);
+                add(o, 52, "Cartel arriba del juego al guardar", self.cfg.overlay);
+                add(o, 53, "Avisarme si hay una versión nueva", self.cfg.updates);
                 sep(o);
                 add(o, 41, "Iniciar con Windows", autostart_enabled());
                 add(o, 49, "Volver a probar cómo grabar (después de cambiar el driver)", false);
@@ -2724,6 +3208,23 @@ mod app {
                     let _ = Command::new("notepad.exe").arg(&self.log_path).spawn();
                 }
                 50 => return true,
+                51 => self.open_update(),
+                52 => {
+                    self.cfg.overlay = !self.cfg.overlay;
+                    self.save_cfg();
+                    if self.cfg.overlay {
+                        self.show_overlay("Así se ve el cartel", "Aparece unos segundos al guardar", 0);
+                    }
+                }
+                53 => {
+                    self.cfg.updates = !self.cfg.updates;
+                    self.save_cfg();
+                    if self.cfg.updates {
+                        self.check_updates();
+                    }
+                }
+                // prueba automática: hacer de cuenta que salió una versión nueva
+                54 => self.update_found(u32::MAX),
                 _ => {}
             }
             false
@@ -2859,6 +3360,8 @@ mod app {
                     focus: None,
                     target: None,
                     favs: std::collections::HashSet::new(),
+                    joins: Vec::new(),
+                    update: self.update,
                     edit: None,
                     edit_brush: CreateSolidBrush(COLORREF(rgb(52, 46, 72))),
                 });
@@ -2993,6 +3496,183 @@ mod app {
             });
         }
 
+        /// Copias que se rehacen: 0 = vertical recortado, 1 = vertical con fondo desenfocado,
+        /// 10 + k = sonido (logic::SOUND_MODES[k]). En un hilo con prioridad baja; el original no se toca.
+        fn special_copy(&self, f: PathBuf, op: usize) {
+            if !f.extension().is_some_and(|x| x.eq_ignore_ascii_case("mp4")) {
+                self.notify("Esto es solo para videos.", false);
+                return;
+            }
+            let tag = match op {
+                0 => "vertical",
+                1 => "vfondo",
+                k if k >= 10 && k - 10 < logic::SOUND_MODES.len() => logic::SOUND_MODES[k - 10].1,
+                _ => return,
+            };
+            let out = free_name(&f, tag);
+            let (ffmpeg, log, enc) = (self.ffmpeg.clone(), self.log_path.clone(), self.cfg.encoder.min(ENCODERS.len() - 1));
+            if op < 10 {
+                self.notify("Armando la versión vertical (1080×1920, la hace la placa; puede tardar unos segundos)…", false);
+            }
+            std::thread::spawn(move || {
+                let (src, dst) = (f.to_string_lossy().into_owned(), out.to_string_lossy().into_owned());
+                if op >= 10 && video_info(&ffmpeg, &src).audio < 3 {
+                    post_text(
+                        "No se puede separar tu voz de este clip: se grabó con el micrófono apagado o con una versión vieja. Los clips nuevos con micrófono ya traen tu voz y el juego por separado.".into(),
+                        None,
+                    );
+                    return;
+                }
+                let args = if op < 10 { logic::vertical_args(enc, &src, op == 1, &dst) } else { logic::sound_args(&src, op - 10, &dst) };
+                let mut cmd = Command::new(&ffmpeg);
+                cmd.args(&args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(log_stdio(&log));
+                let ok = spawn_hidden(&mut cmd, IDLE).and_then(|mut c| c.wait()).is_ok_and(|s| s.success());
+                let size = fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
+                let fname = out.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                if ok && size > 0 {
+                    let msg = if op < 10 {
+                        format!("Listo: versión vertical para TikTok, Reels y Shorts ({}): {fname}", logic::fmt_size(size))
+                    } else {
+                        format!("Listo, sonido nuevo ({}): {fname}", logic::SOUND_MODES[op - 10].0.to_lowercase())
+                    };
+                    post_text(msg, Some(dst));
+                } else {
+                    let _ = fs::remove_file(&out);
+                    post_text("No pude hacer la copia del clip (mirá el registro).".to_string(), None);
+                }
+            });
+        }
+
+        /// Marcar / desmarcar el clip elegido para juntarlo con otros (en el orden en que se marcan).
+        fn toggle_join(&mut self) {
+            let Some(f) = self.selected_file() else { return };
+            if !f.extension().is_some_and(|x| x.eq_ignore_ascii_case("mp4")) {
+                self.notify("Solo se pueden juntar videos.", false);
+                return;
+            }
+            let Some(g) = self.gallery.as_mut() else { return };
+            match g.joins.iter().position(|p| *p == f) {
+                Some(i) => {
+                    g.joins.remove(i);
+                }
+                None => g.joins.push(f),
+            }
+            g.redraw();
+        }
+
+        /// Junta los clips marcados en un video nuevo (los originales no se tocan).
+        fn join_marked(&mut self) {
+            let files: Vec<PathBuf> = match self.gallery.as_ref() {
+                Some(g) => g.joins.iter().filter(|p| p.exists()).cloned().collect(),
+                None => return,
+            };
+            if files.len() < 2 {
+                self.notify("Marcá al menos 2 clips para juntar: clic derecho → Marcar para juntar (o Ctrl + clic en el clip).", false);
+                return;
+            }
+            if let Some(g) = self.gallery.as_mut() {
+                g.joins.clear();
+                g.redraw();
+            }
+            let out = free_name(&files[0], "montaje");
+            let n = files.len();
+            let (ffmpeg, log, enc) = (self.ffmpeg.clone(), self.log_path.clone(), self.cfg.encoder.min(ENCODERS.len() - 1));
+            self.notify(&format!("Juntando {n} clips en un solo video (lo hace la placa; puede tardar un poco)…"), false);
+            std::thread::spawn(move || {
+                let inputs: Vec<(String, logic::Info)> = files
+                    .iter()
+                    .map(|p| {
+                        let ps = p.to_string_lossy().into_owned();
+                        let info = video_info(&ffmpeg, &ps);
+                        (ps, info)
+                    })
+                    .collect();
+                let total: f64 = inputs.iter().map(|x| x.1.dur).sum();
+                let dst = out.to_string_lossy().into_owned();
+                let mut cmd = Command::new(&ffmpeg);
+                cmd.args(logic::join_args(enc, &inputs, &dst)).stdin(Stdio::null()).stdout(Stdio::null()).stderr(log_stdio(&log));
+                let ok = spawn_hidden(&mut cmd, IDLE).and_then(|mut c| c.wait()).is_ok_and(|s| s.success());
+                let fname = out.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                if ok && fs::metadata(&out).is_ok_and(|m| m.len() > 0) {
+                    post_text(format!("Listo: juntaste {n} clips en un solo video ({}): {fname}", logic::fmt_elapsed(total.round() as u64)), Some(dst));
+                } else {
+                    let _ = fs::remove_file(&out);
+                    post_text("No pude juntar los clips (mirá el registro).".to_string(), None);
+                }
+            });
+        }
+
+        /// Busca en GitHub si salió una versión nueva (un pedido chico con curl.exe de Windows).
+        fn check_updates(&self) {
+            if !self.cfg.updates || logic::BUILD.parse::<u32>().is_err() {
+                return;
+            }
+            let hw = self.hwnd.0 as isize;
+            let log = self.log_path.clone();
+            std::thread::spawn(move || {
+                let curl = std::env::var("SystemRoot").map(|r| PathBuf::from(r).join("System32").join("curl.exe")).unwrap_or_else(|_| PathBuf::from("curl.exe"));
+                let mut cmd = Command::new(curl);
+                cmd.args(logic::update_args()).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+                let v = spawn_hidden(&mut cmd, IDLE)
+                    .and_then(|c| c.wait_with_output())
+                    .ok()
+                    .and_then(|o| logic::latest_version(&String::from_utf8_lossy(&o.stdout)))
+                    .unwrap_or(0);
+                let what = if v > 0 { format!("v1.0.{v}") } else { "no se supo (¿sin internet?)".to_string() };
+                log_line(&log, &format!("buscar versión nueva: la última publicada es {what} (esta es la {})", logic::BUILD));
+                unsafe {
+                    let _ = PostMessageW(Some(HWND(hw as _)), WM_UPDATE, WPARAM(v as usize), LPARAM(0));
+                }
+            });
+        }
+
+        fn update_found(&mut self, v: u32) {
+            if v == 0 || !logic::is_newer(logic::BUILD, v) || self.update == Some(v) {
+                return;
+            }
+            self.update = Some(v);
+            log_line(&self.log_path, &format!("hay una versión nueva: v1.0.{v}"));
+            if let Some(g) = self.gallery.as_mut() {
+                g.update = Some(v);
+                g.redraw();
+            }
+            self.notify(&format!("Salió una versión nueva de Jugadón (v1.0.{v}). Tocá acá para bajarla."), false);
+            self.click_update.set(true);
+        }
+
+        fn open_update(&self) {
+            let url = wide(&format!("{}/releases/latest", logic::REPO_URL));
+            unsafe {
+                ShellExecuteW(None, w!("open"), PCWSTR(url.as_ptr()), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL);
+            }
+        }
+
+        /// Cartelito arriba del juego según el aviso (solo para lo que pasa mientras jugás).
+        fn overlay_for(&self, text: &str) {
+            let starts = |p: &[&str]| p.iter().any(|x| text.starts_with(x));
+            let (title, sub, kind) = if starts(&["Clip guardado"]) {
+                ("Clip guardado", format!("Últimos {} s · está en Mis clips", self.cfg.secs), 0)
+            } else if starts(&["Captura guardada"]) {
+                ("Captura guardada", "Está en Mis clips".to_string(), 0)
+            } else if starts(&["Grabación guardada", "La grabación se cortó"]) {
+                ("Grabación guardada", "Está en Mis clips".to_string(), 0)
+            } else if starts(&["No se pudo guardar el clip", "No se pudo sacar la captura"]) {
+                ("No se pudo guardar", "Mirá el aviso de la bandeja".to_string(), 2)
+            } else {
+                return;
+            };
+            self.show_overlay(title, &sub, kind);
+        }
+
+        /// kind: 0 listo, 1 grabando, 2 problema.
+        fn show_overlay(&self, title: &str, sub: &str, kind: u8) {
+            if !self.cfg.overlay {
+                return;
+            }
+            let ok = unsafe { overlay_show(title, sub, kind) };
+            log_line(&self.log_path, &if ok { format!("cartel en pantalla: {title}") } else { "cartel en pantalla: este Windows no deja ocultarlo de la grabación (no se muestra)".to_string() });
+        }
+
         fn toggle_fav(&mut self) {
             let Some(f) = self.selected_file() else { return };
             let name = f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -3115,6 +3795,17 @@ mod app {
                     self.make_copy(2, 0);
                     return;
                 }
+                281 => {
+                    self.join_marked();
+                    return;
+                }
+                282 => {
+                    if let Some(g) = self.gallery.as_mut() {
+                        g.joins.clear();
+                        g.redraw();
+                    }
+                    return;
+                }
                 208 => {
                     self.toggle_fav();
                     return;
@@ -3165,6 +3856,9 @@ mod app {
                 }
                 202 => self.share_link(f.clone(), false),
                 270 => self.share_link(f.clone(), true),
+                262 | 263 => self.special_copy(f.clone(), id - 262),
+                290..=294 => self.special_copy(f.clone(), 10 + id - 290),
+                280 => self.toggle_join(),
                 271 => {
                     let hwnd = self.gallery.as_ref().map(|g| g.hwnd).unwrap_or(self.hwnd);
                     let mut token = self.share_token.take();
@@ -3230,7 +3924,10 @@ mod app {
                     // un toque en el clip lo abre para verlo y editarlo (el doble clic no lo abre dos veces)
                     g.sel = Some(i);
                     g.redraw();
-                    if !double {
+                    // Ctrl + clic: marcar para juntar
+                    if unsafe { GetKeyState(VK_CONTROL.0 as i32) } < 0 {
+                        self.toggle_join();
+                    } else if !double {
                         self.gallery_cmd(201);
                     }
                 }
@@ -3250,6 +3947,13 @@ mod app {
                 }
                 Hit::Btn(1) => self.save_clip(),
                 Hit::Btn(2) => self.gallery_cmd(206),
+                Hit::Btn(4) => self.join_marked(),
+                Hit::Btn(5) => {
+                    g.joins.clear();
+                    g.redraw();
+                }
+                Hit::Btn(6) => self.open_update(),
+                Hit::Btn(7) => {}
                 Hit::Btn(_) => return Some(Outside::Menu),
                 Hit::Bar => {
                     g.drag = Some(y);
@@ -3351,7 +4055,7 @@ mod app {
         Card(usize),
         Play(usize),
         Act(usize, usize),
-        /// 0 grabar, 1 guardar clip, 2 carpeta, 3 ajustes
+        /// 0 grabar, 1 guardar clip, 2 carpeta, 3 ajustes, 4 juntar, 5 cancelar juntar, 6 versión nueva, 7 fondo de la barra
         Btn(u8),
         Bar,
     }
@@ -3391,6 +4095,10 @@ mod app {
         /// cuadro de texto para renombrar (control, tarjeta)
         edit: Option<(HWND, usize)>,
         edit_brush: HBRUSH,
+        /// clips marcados para juntar, en orden
+        joins: Vec<PathBuf>,
+        /// versión nueva para bajar (botón verde de la izquierda)
+        update: Option<u32>,
     }
 
     const NAV: [(&str, u16); 5] = [("Todo", 0xE8A9), ("Clips", 0xE714), ("Grabaciones", 0xE7C8), ("Capturas", 0xEB9F), ("Favoritos", 0xE734)];
@@ -3419,6 +4127,13 @@ mod app {
     const WM_THUMB: u32 = WM_APP + 10;
 
     impl Gallery {
+        /// Para el menú de una tarjeta: (¿es video?, ¿favorito?, ¿marcado para juntar?, cuántos marcados)
+        fn menu_info(&self, i: usize) -> (bool, bool, bool, usize) {
+            let it = &self.items[i];
+            let joins = self.joins.iter().filter(|p| self.items.iter().any(|x| &x.path == *p)).count();
+            (it.kind != 2, self.favs.contains(&it.name), self.joins.contains(&it.path), joins)
+        }
+
         fn redraw(&self) {
             unsafe {
                 let _ = InvalidateRect(Some(self.hwnd), None, false);
@@ -3675,6 +4390,16 @@ mod app {
             let st = status.trim_start_matches("● ");
             text(dc, st, rc(card.left + s(14), card.top + s(34), card.right - s(10), card.bottom - s(6)), self.fonts.small, MUTED, DT_WORDBREAK | DT_END_ELLIPSIS);
             by = card.top - s(12);
+            if let Some(v) = self.update {
+                let r = rc(bx.0, by - s(44), bx.1, by);
+                let on = self.hover == Hit::Btn(6);
+                grad_round(dc, r, s(12), if on { rgb(110, 240, 160) } else { GREEN }, rgb(16, 180, 150), false);
+                glyph_at(dc, 0xE896, rc(r.left + s(10), r.top, r.left + s(36), r.bottom), self.fonts.icon, rgb(6, 34, 18));
+                text(dc, "Bajar versión nueva", rc(r.left + s(40), r.top + s(4), r.right - s(6), r.top + s(24)), self.fonts.bold, rgb(6, 34, 18), DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+                text(dc, &format!("v1.0.{v}"), rc(r.left + s(40), r.top + s(22), r.right - s(6), r.bottom - s(4)), self.fonts.small, rgb(10, 60, 34), DT_SINGLELINE | DT_VCENTER);
+                self.hits.push((r, Hit::Btn(6)));
+                by = r.top - s(10);
+            }
             // ajustes y carpeta
             for (b, glyph, label) in [(3u8, 0xE713u16, "Ajustes"), (2, 0xE838, "Abrir carpeta")] {
                 let r = rc(bx.0, by - s(38), bx.1, by);
@@ -3796,11 +4521,14 @@ mod app {
                 let r = rc(x, y, x + cw, y + ch);
                 let hovered = matches!(self.hover, Hit::Card(i) | Hit::Play(i) | Hit::Act(i, _) if i == idx);
                 let selected = self.sel == Some(idx);
+                let join_no = self.joins.iter().position(|p| *p == it.path);
                 // tarjeta
                 // sombra suave
                 shade_round(dc, rc(r.left + s(2), r.top + s(5), r.right + s(2), r.bottom + s(6)), s(16), 0, 90);
                 if selected {
                     grad_round(dc, rc(r.left - s(3), r.top - s(3), r.right + s(3), r.bottom + s(3)), s(16), ORANGE, PINK, false);
+                } else if join_no.is_some() {
+                    round(dc, rc(r.left - s(3), r.top - s(3), r.right + s(3), r.bottom + s(3)), s(16), GREEN);
                 }
                 round(dc, r, s(14), if hovered || selected { CARD_HOVER } else { CARD });
                 // miniatura (esquinas de arriba redondeadas)
@@ -3839,6 +4567,13 @@ mod app {
                     let fr = rc(lr.right + s(6), lr.top, lr.right + s(28), lr.bottom);
                     round(dc, fr, s(10), rgb(255, 196, 0));
                     glyph_at(dc, 0xE735, fr, self.fonts.small, rgb(60, 40, 0));
+                }
+                if let Some(k) = join_no {
+                    // número de orden para juntar
+                    let x0 = lr.right + if fav { s(34) } else { s(6) };
+                    let jr = rc(x0, lr.top, x0 + s(20), lr.bottom);
+                    ellipse(dc, jr, GREEN);
+                    text(dc, &(k + 1).to_string(), jr, self.fonts.badge, rgb(6, 40, 20), DT_SINGLELINE | DT_VCENTER | DT_CENTER);
                 }
                 // duración
                 if let Some(d) = it.dur {
@@ -3904,6 +4639,34 @@ mod app {
             }
             SelectClipRgn(dc, None);
             let _ = DeleteObject(rgn.into());
+            // barra flotante para juntar clips (solo si hay alguno marcado)
+            let nj = self.joins.iter().filter(|p| self.items.iter().any(|i| &i.path == *p)).count();
+            if nj > 0 {
+                let bw = s(500).min(page.right - page.left - s(16));
+                let cx = (page.left + page.right) / 2;
+                let bar = rc(cx - bw / 2, h - s(78), cx + bw / 2, h - s(20));
+                shade_round(dc, rc(bar.left + s(2), bar.top + s(6), bar.right + s(2), bar.bottom + s(8)), s(22), 0, 120);
+                round(dc, bar, s(20), rgb(38, 34, 54));
+                self.hits.push((bar, Hit::Btn(7)));
+                let nr = rc(bar.left + s(14), bar.top + s(17), bar.left + s(38), bar.top + s(41));
+                ellipse(dc, nr, GREEN);
+                text(dc, &nj.to_string(), nr, self.fonts.bold, rgb(6, 40, 20), DT_SINGLELINE | DT_VCENTER | DT_CENTER);
+                let jr = rc(bar.right - s(204), bar.top + s(11), bar.right - s(102), bar.bottom - s(11));
+                let cr = rc(bar.right - s(94), bar.top + s(11), bar.right - s(12), bar.bottom - s(11));
+                let msg = if nj < 2 { "Marcá otro clip (Ctrl + clic)".to_string() } else { format!("{nj} clips para juntar, en orden") };
+                text(dc, &msg, rc(nr.right + s(10), bar.top, jr.left - s(8), bar.bottom), self.fonts.bold, TEXT, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+                if nj >= 2 {
+                    let on = self.hover == Hit::Btn(4);
+                    grad_round(dc, jr, s(18), if on { rgb(110, 240, 160) } else { GREEN }, rgb(16, 180, 150), false);
+                } else {
+                    round(dc, jr, s(18), rgb(56, 50, 76));
+                }
+                text(dc, "Juntar", jr, self.fonts.bold, if nj >= 2 { rgb(6, 34, 18) } else { MUTED }, DT_SINGLELINE | DT_VCENTER | DT_CENTER);
+                round(dc, cr, s(18), if self.hover == Hit::Btn(5) { rgb(70, 62, 98) } else { rgb(52, 46, 72) });
+                text(dc, "Cancelar", cr, self.fonts.small, TEXT, DT_SINGLELINE | DT_VCENTER | DT_CENTER);
+                self.hits.push((jr, Hit::Btn(4)));
+                self.hits.push((cr, Hit::Btn(5)));
+            }
             // barra de desplazamiento finita
             if self.max_scroll() > 0 {
                 let track = rc(w - s(12), top + s(4), w - s(6), h - s(8));
@@ -4188,8 +4951,39 @@ mod app {
         });
     }
 
+    /// Submenú "Vertical" (sound = false) o "Sonido" (sound = true).
+    unsafe fn tool_menu(sound: bool) -> HMENU {
+        let m = CreatePopupMenu().unwrap_or_default();
+        let item = |id: usize, t: &str| {
+            let t = wide(t);
+            let _ = AppendMenuW(m, MF_STRING, id, PCWSTR(t.as_ptr()));
+        };
+        if sound {
+            for (i, (label, _)) in logic::SOUND_MODES.iter().enumerate() {
+                item(290 + i, label);
+            }
+            let _ = AppendMenuW(m, MF_SEPARATOR, 0, PCWSTR::null());
+            let t = wide("(para clips grabados con el micrófono; crea una copia)");
+            let _ = AppendMenuW(m, MF_STRING | MF_GRAYED, 0, PCWSTR(t.as_ptr()));
+        } else {
+            item(262, "Recortado al centro (llena la pantalla)");
+            item(263, "Entero, con el fondo desenfocado");
+        }
+        m
+    }
+
+    /// El submenú de vertical o de sonido solo (botones del visor). Devuelve el comando elegido.
+    unsafe fn popup_tool(hwnd: HWND, sound: bool) -> usize {
+        let m = tool_menu(sound);
+        let mut pt = POINT::default();
+        let _ = GetCursorPos(&mut pt);
+        let cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY, pt.x, pt.y, None, hwnd, None);
+        let _ = DestroyMenu(m);
+        cmd.0 as usize
+    }
+
     /// Menú del clic derecho sobre una tarjeta.
-    unsafe fn card_menu(hwnd: HWND, video: bool, fav: bool) -> usize {
+    unsafe fn card_menu(hwnd: HWND, video: bool, fav: bool, marked: bool, joins: usize) -> usize {
         let m = CreatePopupMenu().unwrap_or_default();
         let item = |menu: HMENU, id: usize, t: &str| {
             let t = wide(t);
@@ -4217,6 +5011,18 @@ mod app {
             }
             let t = wide("Recortar (crea una copia)");
             let _ = AppendMenuW(m, MF_POPUP, sub.0 as usize, PCWSTR(t.as_ptr()));
+            let t = wide("Vertical para TikTok, Reels y Shorts");
+            let _ = AppendMenuW(m, MF_POPUP, tool_menu(false).0 as usize, PCWSTR(t.as_ptr()));
+            let t = wide("Sonido: mi voz y el juego por separado");
+            let _ = AppendMenuW(m, MF_POPUP, tool_menu(true).0 as usize, PCWSTR(t.as_ptr()));
+            let _ = AppendMenuW(m, MF_SEPARATOR, 0, PCWSTR::null());
+            item(m, 280, if marked { "No juntar este clip" } else { "Marcar para juntar con otros\tCtrl+clic" });
+            if joins >= 2 {
+                item(m, 281, &format!("Juntar los {joins} clips marcados en un video"));
+            }
+            if joins >= 1 {
+                item(m, 282, "Desmarcar todos");
+            }
         }
         item(m, 204, "Mostrar en carpeta");
         let _ = AppendMenuW(m, MF_SEPARATOR, 0, PCWSTR::null());
@@ -4370,15 +5176,15 @@ mod app {
                         Hit::Card(i) | Hit::Play(i) | Hit::Act(i, _) => {
                             g.sel = Some(i);
                             g.redraw();
-                            Some((g.items[i].kind != 2, g.favs.contains(&g.items[i].name)))
+                            Some(g.menu_info(i))
                         }
                         _ => None,
                     }
                 })
                 .flatten();
-                if let Some((video, fav)) = on_card {
+                if let Some((video, fav, marked, joins)) = on_card {
                     let _ = UpdateWindow(hwnd);
-                    let cmd = card_menu(hwnd, video, fav);
+                    let cmd = card_menu(hwnd, video, fav, marked, joins);
                     if cmd != 0 {
                         with_app(|a| a.gallery_cmd(cmd));
                     }
@@ -4401,9 +5207,9 @@ mod app {
                 let shift = GetKeyState(VK_SHIFT.0 as i32) < 0;
                 // tecla de menú o Shift+F10: el menú de la tarjeta elegida
                 if vk == 0x5D || (shift && vk == 0x79) {
-                    let video = with_app(|a| a.gallery.as_ref().and_then(|g| g.sel.map(|i| (g.items[i].kind != 2, g.favs.contains(&g.items[i].name))))).flatten();
-                    if let Some((video, fav)) = video {
-                        let cmd = card_menu(hwnd, video, fav);
+                    let info = with_app(|a| a.gallery.as_ref().and_then(|g| g.sel.map(|i| g.menu_info(i)))).flatten();
+                    if let Some((video, fav, marked, joins)) = info {
+                        let cmd = card_menu(hwnd, video, fav, marked, joins);
                         if cmd != 0 {
                             with_app(|a| a.gallery_cmd(cmd));
                         }
@@ -4708,11 +5514,10 @@ mod app {
             } else {
                 format!("{} / {}", logic::fmt_elapsed(self.pos as u64), logic::fmt_elapsed(self.dur.round() as u64))
             };
-            text(dc, &t, rc(pr.right + s(14), by, w, by + s(52)), bold, TEXT, DT_SINGLELINE | DT_VCENTER);
-            // botones a la derecha
+            // botones a la derecha (el de abrir afuera, solo con el ícono)
             let mut x = w - s(24);
-            for (b, label, glyph) in [(3u8, "Reproductor de Windows", 0xE8A7u16), (2, "Para Discord", 0xE8BD), (1, "Copiar link", 0xE71B), (0, "Guardar recorte", 0xE8C6)] {
-                let tw = text_w(dc, bold, label) + s(56);
+            for (b, label, glyph) in [(3u8, "", 0xE8A7u16), (2, "Discord", 0xE8BD), (1, "Copiar link", 0xE71B), (5, "Sonido", 0xE767), (4, "Vertical", 0xE717), (0, "Guardar recorte", 0xE8C6)] {
+                let tw = if label.is_empty() { s(44) } else { text_w(dc, bold, label) + s(52) };
                 let r = rc(x - tw, by + s(4), x, by + s(48));
                 let on = self.hover == VHit::Btn(b);
                 let accent = b == 0 && self.trimmed();
@@ -4721,11 +5526,21 @@ mod app {
                 } else {
                     round(dc, r, s(22), if on { rgb(66, 58, 92) } else { rgb(44, 38, 62) });
                 }
-                glyph_at(dc, glyph, rc(r.left + s(12), r.top, r.left + s(40), r.bottom), icon, if accent { TEXT } else { ORANGE });
-                text(dc, label, rc(r.left + s(42), r.top, r.right, r.bottom), bold, if b == 0 && !self.trimmed() { MUTED } else { TEXT }, DT_SINGLELINE | DT_VCENTER);
+                let gr = if label.is_empty() { r } else { rc(r.left + s(10), r.top, r.left + s(38), r.bottom) };
+                glyph_at(dc, glyph, gr, icon, if accent { TEXT } else { ORANGE });
+                text(dc, label, rc(r.left + s(40), r.top, r.right, r.bottom), bold, if b == 0 && !self.trimmed() { MUTED } else { TEXT }, DT_SINGLELINE | DT_VCENTER);
                 self.hits.push((r, VHit::Btn(b)));
-                x = r.left - s(10);
+                if self.hover == VHit::Btn(b) && label.is_empty() {
+                    // qué hace el botón de solo ícono
+                    let tip = "Abrir en el reproductor de Windows";
+                    let tw2 = text_w(dc, body, tip) + s(16);
+                    let tr2 = rc(r.right - tw2, r.top - s(30), r.right, r.top - s(6));
+                    round(dc, tr2, s(10), rgb(44, 38, 62));
+                    text(dc, tip, tr2, body, TEXT, DT_SINGLELINE | DT_VCENTER | DT_CENTER);
+                }
+                x = r.left - s(8);
             }
+            text(dc, &t, rc(pr.right + s(14), by, x - s(6), by + s(52)), bold, TEXT, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
             if !self.trimmed() && self.dur > 0.0 {
                 text(dc, "Arrastrá las manijas amarillas para recortar  ·  Espacio: pausa  ·  I / O: marcar inicio y fin", rc(s(24), h - s(22), w, h - s(4)), body, MUTED, DT_SINGLELINE | DT_VCENTER);
             }
@@ -4824,6 +5639,16 @@ mod app {
             }
         }
 
+        /// Vertical (262/263) o sonido (290..) del clip que se está viendo.
+        fn viewer_cmd(&mut self, id: usize) {
+            let Some(path) = self.viewer.as_ref().map(|v| v.path.clone()) else { return };
+            match id {
+                262 | 263 => self.special_copy(path, id - 262),
+                290..=294 => self.special_copy(path, 10 + id - 290),
+                _ => {}
+            }
+        }
+
         fn viewer_btn(&mut self, b: u8) {
             let Some(v) = self.viewer.as_ref() else { return };
             let (path, inp, out, dur, trimmed) = (v.path.clone(), v.inp, v.out, v.dur, v.trimmed());
@@ -4918,7 +5743,7 @@ mod app {
             WM_GETMINMAXINFO => {
                 let dpi = windows::Win32::UI::HiDpi::GetDpiForWindow(hwnd).max(96) as i32;
                 let mi = &mut *(lp.0 as *mut MINMAXINFO);
-                mi.ptMinTrackSize = POINT { x: 760 * dpi / 96, y: 460 * dpi / 96 };
+                mi.ptMinTrackSize = POINT { x: 980 * dpi / 96, y: 460 * dpi / 96 };
                 LRESULT(0)
             }
             WM_TIMER => {
@@ -4971,7 +5796,15 @@ mod app {
                 })
                 .flatten();
                 if let Some(b) = btn {
-                    with_app(|a| a.viewer_btn(b));
+                    if b == 4 || b == 5 {
+                        // el menú va fuera del préstamo de App (tiene su propio bucle de mensajes)
+                        let cmd = popup_tool(hwnd, b == 5);
+                        if cmd != 0 {
+                            with_app(|a| a.viewer_cmd(cmd));
+                        }
+                    } else {
+                        with_app(|a| a.viewer_btn(b));
+                    }
                 }
                 LRESULT(0)
             }
@@ -5020,6 +5853,10 @@ mod app {
                 LRESULT(0)
             }
             WM_COMMAND => {
+                // prueba automática: vertical / sonido desde el visor
+                if wp.0 & 0xFFFF >= 200 {
+                    with_app(|a| a.viewer_cmd(wp.0 & 0xFFFF));
+                }
                 // prueba automática: marcar un recorte de 1 a 4 s y guardarlo
                 if wp.0 & 0xFFFF == 1 {
                     with_app(|a| {
@@ -5041,6 +5878,159 @@ mod app {
                 let v = with_app(|a| a.viewer.take()).flatten();
                 drop(v);
                 trim_ram();
+                LRESULT(0)
+            }
+            _ => DefWindowProcW(hwnd, msg, wp, lp),
+        }
+    }
+
+    // ---------- cartelito arriba del juego ("Clip guardado ✓") ----------
+    // Ventana chiquita, siempre arriba, que no roba el foco ni los clics y no sale en las grabaciones.
+    // Se dibuja una sola vez por aviso y se desvanece sola (un temporizador de 16 ms por 2,7 s).
+
+    struct Ovl {
+        hwnd: HWND,
+        title: String,
+        sub: String,
+        kind: u8,
+        t0: Instant,
+        /// título, texto chico, íconos
+        fonts: [HFONT; 3],
+        dpi: i32,
+    }
+
+    thread_local! {
+        static OVL: RefCell<Option<Ovl>> = const { RefCell::new(None) };
+    }
+
+    /// Devuelve false si este Windows no deja ocultarlo de las capturas (entonces no se muestra).
+    unsafe fn overlay_show(title: &str, sub: &str, kind: u8) -> bool {
+        let existing = OVL.with(|o| o.borrow().as_ref().map(|v| v.hwnd)).filter(|h| IsWindow(Some(*h)).as_bool());
+        let hwnd = match existing {
+            Some(h) => h,
+            None => {
+                let hinst = GetModuleHandleW(None).unwrap_or_default();
+                let Ok(h) = CreateWindowExW(
+                    WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+                    w!("jugadon_aviso"),
+                    w!("Jugadón"),
+                    WS_POPUP,
+                    0,
+                    0,
+                    1,
+                    1,
+                    None,
+                    None,
+                    Some(hinst.into()),
+                    None,
+                ) else {
+                    return false;
+                };
+                // WDA_EXCLUDEFROMCAPTURE (Windows 10 2004+): se ve en pantalla pero no en los clips
+                if SetWindowDisplayAffinity(h, WINDOW_DISPLAY_AFFINITY(0x11)).is_err() {
+                    let _ = DestroyWindow(h);
+                    return false;
+                }
+                let dpi = (windows::Win32::UI::HiDpi::GetDpiForSystem() as i32).max(96);
+                let font = |px: i32, weight: i32, face: PCWSTR| {
+                    CreateFontW(-(px * dpi / 96), 0, 0, 0, weight, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, 0, face)
+                };
+                let fonts = [font(17, 700, w!("Segoe UI")), font(13, 400, w!("Segoe UI")), font(18, 400, w!("Segoe MDL2 Assets"))];
+                OVL.with(|o| *o.borrow_mut() = Some(Ovl { hwnd: h, title: String::new(), sub: String::new(), kind: 0, t0: Instant::now(), fonts, dpi }));
+                h
+            }
+        };
+        let Some((fonts, dpi)) = OVL.with(|o| {
+            let mut o = o.borrow_mut();
+            let v = o.as_mut()?;
+            v.title = title.to_string();
+            v.sub = sub.to_string();
+            v.kind = kind;
+            v.t0 = Instant::now();
+            Some((v.fonts, v.dpi))
+        }) else {
+            return false;
+        };
+        let s = |v: i32| v * dpi / 96;
+        // ancho según el texto
+        let dc = GetDC(Some(hwnd));
+        let tw = text_w(dc, fonts[0], title).max(text_w(dc, fonts[1], sub));
+        ReleaseDC(Some(hwnd), dc);
+        let (w, h) = ((tw + s(88)).clamp(s(220), s(520)), s(66));
+        // arriba a la derecha del monitor donde está el juego
+        let mon = MonitorFromWindow(GetForegroundWindow(), MONITOR_DEFAULTTOPRIMARY);
+        let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+        let r = if GetMonitorInfoW(mon, &mut mi).as_bool() { mi.rcMonitor } else { rc(0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) };
+        let rgn = CreateRoundRectRgn(0, 0, w + 1, h + 1, s(20), s(20));
+        SetWindowRgn(hwnd, Some(rgn), false);
+        let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 0, LWA_ALPHA);
+        let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), r.right - w - s(28), r.top + s(28), w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        let _ = InvalidateRect(Some(hwnd), None, false);
+        SetTimer(Some(hwnd), 1, 16, None);
+        true
+    }
+
+    unsafe extern "system" fn overlay_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+        match msg {
+            WM_NCHITTEST => LRESULT(-1), // HTTRANSPARENT: los clics pasan al juego
+            WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
+            WM_ERASEBKGND => LRESULT(1),
+            WM_PAINT => {
+                let mut ps = PAINTSTRUCT::default();
+                let dc = BeginPaint(hwnd, &mut ps);
+                let mut r = RECT::default();
+                let _ = GetClientRect(hwnd, &mut r);
+                let (w, h) = (r.right.max(1), r.bottom.max(1));
+                let mem = CreateCompatibleDC(Some(dc));
+                let bmp = CreateCompatibleBitmap(dc, w, h);
+                let old = SelectObject(mem, bmp.into());
+                SetBkMode(mem, TRANSPARENT);
+                OVL.with(|o| {
+                    let o = o.borrow();
+                    let Some(v) = o.as_ref() else { return };
+                    let s = |x: i32| x * v.dpi / 96;
+                    fill(mem, rc(0, 0, w, h), rgb(20, 18, 28));
+                    let (a, b) = match v.kind {
+                        1 => (RED, rgb(255, 90, 110)),
+                        2 => (rgb(255, 176, 0), rgb(255, 120, 0)),
+                        _ => (ORANGE, PINK),
+                    };
+                    grad_in(mem, rc(0, 0, s(6), h), CreateRectRgn(0, 0, s(6), h), a, b, true);
+                    let d = s(36);
+                    let cr = rc(s(20), (h - d) / 2, s(20) + d, (h + d) / 2);
+                    grad_ellipse(mem, cr, a, b);
+                    match v.kind {
+                        1 => ellipse(mem, rc(cr.left + s(12), cr.top + s(12), cr.right - s(12), cr.bottom - s(12)), TEXT),
+                        2 => glyph_at(mem, 0xE7BA, cr, v.fonts[2], TEXT),
+                        _ => glyph_at(mem, 0xE73E, cr, v.fonts[2], TEXT),
+                    }
+                    let x0 = cr.right + s(14);
+                    text(mem, &v.title, rc(x0, s(10), w - s(14), s(36)), v.fonts[0], TEXT, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+                    text(mem, &v.sub, rc(x0, s(35), w - s(14), h - s(10)), v.fonts[1], MUTED, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+                });
+                let _ = BitBlt(dc, 0, 0, w, h, Some(mem), 0, 0, SRCCOPY);
+                SelectObject(mem, old);
+                let _ = DeleteObject(bmp.into());
+                let _ = DeleteDC(mem);
+                let _ = EndPaint(hwnd, &ps);
+                LRESULT(0)
+            }
+            WM_TIMER => {
+                let t = OVL.with(|o| o.borrow().as_ref().map(|v| v.t0.elapsed().as_secs_f32())).unwrap_or(9.0);
+                // aparece en 0,18 s, queda 2,1 s y se va en 0,4 s
+                let a = if t < 0.18 {
+                    t / 0.18
+                } else if t < 2.3 {
+                    1.0
+                } else {
+                    1.0 - (t - 2.3) / 0.4
+                };
+                if a <= 0.0 {
+                    let _ = KillTimer(Some(hwnd), 1);
+                    let _ = ShowWindow(hwnd, SW_HIDE);
+                } else {
+                    let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), (a.min(1.0) * 242.0) as u8, LWA_ALPHA);
+                }
                 LRESULT(0)
             }
             _ => DefWindowProcW(hwnd, msg, wp, lp),
@@ -5168,7 +6158,7 @@ mod app {
                 } else if m == WM_RBUTTONUP {
                     show_menu(hwnd);
                 } else if m == NIN_BALLOONUSERCLICK {
-                    with_app(|a| a.show_last_file());
+                    with_app(|a| if a.click_update.get() { a.open_update() } else { a.show_last_file() });
                 }
                 LRESULT(0)
             }
@@ -5205,6 +6195,9 @@ mod app {
                     with_app(|a| a.tick());
                 } else if wp.0 == TIMER_BIND {
                     with_app(|a| a.finish_bind(0, 0));
+                } else if wp.0 == TIMER_UPDATE {
+                    SetTimer(Some(hwnd), TIMER_UPDATE, 12 * 3600 * 1000, None);
+                    with_app(|a| a.check_updates());
                 }
                 LRESULT(0)
             }
@@ -5217,10 +6210,15 @@ mod app {
                 with_app(|a| a.probe_done(wp.0));
                 LRESULT(0)
             }
+            WM_UPDATE => {
+                with_app(|a| a.update_found(wp.0 as u32));
+                LRESULT(0)
+            }
             WM_DONE => {
                 let (text, file) = *Box::from_raw(lp.0 as *mut (String, Option<String>));
                 with_app(|a| {
                     a.notify(&text, text.starts_with("No "));
+                    a.overlay_for(&text);
                     if file.is_some() {
                         a.last_file = file;
                         a.fill_gallery();
@@ -5374,6 +6372,8 @@ mod app {
                 };
                 RegisterClassW(&vc);
             }
+            let owc = WNDCLASSW { lpfnWndProc: Some(overlay_proc), hInstance: hinst.into(), lpszClassName: w!("jugadon_aviso"), ..Default::default() };
+            RegisterClassW(&owc);
             if RegisterClassW(&gwc) == 0 {
                 log_line(&log_path, &format!("no se pudo registrar la clase de la ventana de clips: {:?}", GetLastError()));
             }
@@ -5421,6 +6421,8 @@ mod app {
                 last_trim: None,
                 last_file: None,
                 sound: logic::clip_sound_wav(cfg_sound_style),
+                update: None,
+                click_update: std::cell::Cell::new(false),
             };
             APP.with(|a| *a.borrow_mut() = Some(app));
             with_app(|a| {
@@ -5436,6 +6438,7 @@ mod app {
                 }
             });
             SetTimer(Some(hwnd), TIMER_WATCHDOG, 2000, None);
+            SetTimer(Some(hwnd), TIMER_UPDATE, 20_000, None);
             let _ = windows::Win32::UI::Accessibility::SetWinEventHook(
                 EVENT_SYSTEM_FOREGROUND,
                 EVENT_SYSTEM_FOREGROUND,
@@ -5481,6 +6484,8 @@ mod audio {
     pub struct Audio {
         pub rate: u32,
         pub channels: u16,
+        /// micrófono en canales aparte (después del juego): ffmpeg arma las 3 pistas
+        pub split: bool,
         tx: mpsc::Sender<File>,
     }
 
@@ -5507,7 +6512,7 @@ mod audio {
         let (tx, rx) = mpsc::channel::<File>();
         thread::spawn(move || unsafe { run(ftx, rx, mic) });
         match frx.recv_timeout(Duration::from_secs(3)) {
-            Ok(Some((rate, channels))) => Some(Audio { rate, channels, tx }),
+            Ok(Some((rate, channels, split))) => Some(Audio { rate, channels, split, tx }),
             _ => None,
         }
     }
@@ -5634,7 +6639,7 @@ mod audio {
         }
     }
 
-    unsafe fn run(ftx: mpsc::SyncSender<Option<(u32, u16)>>, rx: mpsc::Receiver<File>, mic: bool) {
+    unsafe fn run(ftx: mpsc::SyncSender<Option<(u32, u16, bool)>>, rx: mpsc::Receiver<File>, mic: bool) {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         let en: IMMDeviceEnumerator = match CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) {
             Ok(e) => e,
@@ -5651,13 +6656,16 @@ mod audio {
             }
         };
         let fmt = (sys.rate, sys.ch);
-        let _ = ftx.send(Some(fmt));
+        // con el micrófono: juego y voz en canales separados (se pueden mezclar distinto después)
+        let split = mic && sys.ch <= 2;
+        let _ = ftx.send(Some((fmt.0, fmt.1, split)));
+        let width = if split { 2 } else { 1 };
         let Ok(mut pipe) = rx.recv() else { return };
         let (rate, chs) = (fmt.0 as u64, fmt.1 as usize);
         let ms = |n: u64| rate * n / 1000;
 
         // Pre-roll: el pipe tiene ~4 KB; la 2da escritura de 10 ms bloquea hasta que ffmpeg empieza a leer.
-        let silence10 = vec![0f32; ms(10) as usize * chs];
+        let silence10 = vec![0f32; ms(10) as usize * chs * width];
         for _ in 0..2 {
             if !write_f32(&mut pipe, &silence10) {
                 return;
@@ -5696,11 +6704,16 @@ mod audio {
             if target > written {
                 let n = (target - written) as usize;
                 out.clear();
-                out.resize(n * chs, 0.0);
-                for s in sources.iter_mut() {
-                    crate::logic::mix_into(&mut out, &mut s.q, 1.0);
+                out.resize(n * chs * width, 0.0);
+                if split {
+                    let (a, b) = sources.split_at_mut(1);
+                    crate::logic::interleave2(&mut out, &mut a[0].q, &mut b[0].q, chs);
+                } else {
+                    for s in sources.iter_mut() {
+                        crate::logic::mix_into(&mut out, &mut s.q, 1.0);
+                    }
                 }
-                if sources.len() > 1 {
+                if sources.len() > 1 && !split {
                     for v in out.iter_mut() {
                         *v = v.clamp(-1.0, 1.0);
                     }
@@ -5709,7 +6722,7 @@ mod audio {
                     break; // ffmpeg terminó
                 }
                 written += n as u64;
-                if out.capacity() > ms(500) as usize * chs {
+                if out.capacity() > ms(500) as usize * chs * width {
                     out = Vec::new(); // después de un bloqueo largo no quedarse con un buffer grande
                 }
             }

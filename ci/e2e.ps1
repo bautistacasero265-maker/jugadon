@@ -142,6 +142,9 @@ try {
   $n = (Files 'clip_*.mp4').Count
   Key 0x78
   Check-Video (Wait-New 'clip_*.mp4' $n 40) 10 "F9: el clip"
+  Check (Wait-Until { Log-Has 'cartel en pantalla: Clip guardado' } 15) "F9 muestra el cartel 'Clip guardado' arriba del juego"
+  Check ([W]::FindWindow('jugadon_aviso', [NullString]::Value) -ne [IntPtr]::Zero) "el cartel es una ventana aparte que no sale en los clips"
+  Get-Content $log | Select-String 'audio:' | Select-Object -Last 1 | ForEach-Object { Write-Host "         log: $($_.Line)" }
   $n = (Files 'shot_*.png').Count
   Key 0x79
   $f = Wait-New 'shot_*.png' $n 30
@@ -196,6 +199,9 @@ try {
     foreach ($bg in @(@(45, '0'), @(46, '1'), @(47, '2'))) { Cmd $bg[0]; Check ((Cfg 'bg') -eq $bg[1]) "clips en segundo plano = $($bg[1]) ($cuando)" }
     $m = Cfg 'mic'; Cmd 43; Check ((Cfg 'mic') -ne $m) "micrófono se cambia ($cuando)"; Cmd 43
     $m = Cfg 'sound'; Cmd 44; Check ((Cfg 'sound') -ne $m) "sonido se cambia ($cuando)"; Cmd 44
+    $m = Cfg 'overlay'; Cmd 52; Check ((Cfg 'overlay') -ne $m) "cartel arriba del juego se cambia ($cuando)"; Cmd 52
+    Check ((Cfg 'overlay') -eq $m) "cartel arriba del juego vuelve ($cuando)"
+    $m = Cfg 'updates'; Cmd 53; Check ((Cfg 'updates') -ne $m) "avisar versión nueva se cambia ($cuando)"; Cmd 53
     $run = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
     $a0 = [bool](Get-ItemProperty $run -Name Jugadon -ErrorAction SilentlyContinue)
     Cmd 41
@@ -269,6 +275,46 @@ try {
   $f = Wait-New '*_discord*.mp4' $n 120
   Check-Video $f 5 "Achicar para Discord"
   if ($f) { Check ((Get-Item $f).Length -lt 10MB) "la copia para Discord pesa menos de 10 MB" }
+  # Vertical para TikTok / Reels / Shorts (recortado al centro)
+  GCmd 241
+  GCmd 210
+  $n = (Files '*_vertical*.mp4').Count
+  GCmd 262
+  $f = Wait-New '*_vertical*.mp4' $n 180
+  Check-Video $f 5 "Vertical para TikTok (recortado)"
+  if ($f) { Check ((Probe $f).Size -eq '1080x1920') "el vertical es 1080x1920" }
+  # Juntar 2 clips (se marcan en orden y se juntan)
+  GCmd 241
+  GCmd 210
+  GCmd 280
+  GCmd 211
+  GCmd 280
+  Start-Sleep -Milliseconds 800
+  [void][W]::SetForegroundWindow($script:gal)
+  Start-Sleep -Milliseconds 500
+  Snap $script:gal 'galeria_juntar.png'
+  $n = (Files '*_montaje*.mp4').Count
+  GCmd 281
+  $f = Wait-New '*_montaje*.mp4' $n 240
+  Check-Video $f 10 "Juntar 2 clips en un video"
+  if ($f) { $p = Probe $f; Check ($p.Audio -le 1) "el video juntado tiene una sola pista de audio (o ninguna)" }
+  # Sonido aparte: solo si este servidor tiene audio (si no, se prueba con cargo test)
+  GCmd 241
+  GCmd 210
+  $n = (Files '*_sinmic*.mp4').Count
+  GCmd 290
+  $f = Wait-New '*_sinmic*.mp4' $n 30
+  if ($f) { Check-Video $f 5 "Sonido → sacar mi voz"; Check ((Probe $f).Audio -eq 1) "sin la voz queda una sola pista" }
+  else { Write-Host "  AVISO  sacar mi voz: este clip no tiene pistas separadas (el servidor no tiene audio); se prueba aparte con cargo test" -ForegroundColor Yellow }
+  # Versión nueva (de mentira): aparece el botón verde
+  Cmd 54
+  Check (Wait-Until { Log-Has 'hay una versión nueva' } 10) "aviso de versión nueva"
+  Start-Sleep -Milliseconds 800
+  [void][W]::SetForegroundWindow($script:gal)
+  Start-Sleep -Milliseconds 500
+  Snap $script:gal 'galeria_version_nueva.png'
+  if (Log-Has 'buscar versión nueva') { Get-Content $log | Select-String 'buscar versión nueva' | Select-Object -Last 1 | ForEach-Object { Write-Host "  OK     $($_.Line)" } }
+  else { Write-Host "  AVISO  todavía no buscó versión nueva" -ForegroundColor Yellow }
   # Favoritos
   GCmd 241
   GCmd 210
@@ -310,6 +356,12 @@ try {
     $f = Wait-New '*_recorte*.mp4' $n 30
     Check-Video $f 2 "visor → Guardar recorte (de 1 a 4 s)"
     if ($f) { Check ((Probe $f).Dur -le 6) "el recorte dura lo marcado (~3 s)" }
+    # vertical con fondo desenfocado, desde el visor
+    $n = (Files '*_vfondo*.mp4').Count
+    [void][W]::PostMessage($script:vw, 0x111, [IntPtr]263, [IntPtr]::Zero)
+    $f = Wait-New '*_vfondo*.mp4' $n 180
+    Check-Video $f 5 "visor → Vertical con fondo desenfocado"
+    if ($f) { Check ((Probe $f).Size -eq '1080x1920') "el vertical con fondo es 1080x1920" }
     Get-Content $log | Select-String 'visor' | Select-Object -Last 3 | ForEach-Object { Write-Host "         log: $($_.Line)" }
     [void][W]::PostMessage($script:vw, 0x10, [IntPtr]::Zero, [IntPtr]::Zero)
     Start-Sleep -Seconds 2

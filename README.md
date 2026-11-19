@@ -7,13 +7,17 @@
 - 🎮 **F9 guarda la jugada.** Los últimos 15 s, 30 s, 1, 2 o 5 minutos (vos elegís), con un "tin-tin" de confirmación.
 - ⏺️ **F8 graba de principio a fin**: la pantalla completa o **una sola ventana** (el juego, el navegador o cualquier otra), aunque tengas otra cosa adelante.
 - 📸 **F10 saca una captura** en `.png`.
-- 🔊 **Sonido del juego y tu micrófono.**
+- 🔊 **Sonido del juego y tu micrófono, en pistas separadas**: después podés sacar tu voz, dejar solo tu voz o bajar uno de los dos sin volver a grabar.
+- ✅ **Cartelito arriba del juego** ("Clip guardado") que no sale en los clips y no te saca del juego.
+- 📱 **Vertical para TikTok, Reels y Shorts** con un clic (recortado o entero con fondo desenfocado).
+- 🎬 **Juntá varios clips en uno** (un montaje) marcándolos en orden.
+- ⬆️ **Te avisa cuando sale una versión nueva.**
 - 🗂️ **Ventana "Mis clips"** con miniaturas: abrís, compartís (con el menú Compartir de Windows), copiás para pegar en Discord o WhatsApp, o borrás.
 - ⚡ **El video lo comprime la placa de video** (NVENC, AMF, Quick Sync o, si el driver es viejo, a través de Windows), no el procesador. Sin juego abierto queda en pausa y no consume nada.
 - 🌍 **Anda con cualquier placa y cualquier driver** en Windows 10 y 11: al abrirla prueba sola qué forma de usar tu placa graba de verdad y se queda con esa.
 - 🔗 **Compartir por link**: tocás compartir y el link queda copiado; lo abre cualquiera, tenga o no Jugadón.
 - ✂️ **Tocás un clip y lo ves y recortás ahí mismo**, al instante y sin perder calidad.
-- 🔒 **Sin cuentas y sin datos**: solo se conecta a internet cuando vos tocás "Copiar link"; tus clips quedan en tu PC.
+- 🔒 **Sin cuentas y sin datos**: solo se conecta a internet cuando vos tocás "Copiar link" y para ver si hay versión nueva (un pedido chico a GitHub, se puede apagar); tus clips quedan en tu PC.
 
 <p align="center"><img src="assets/captura_ventana.png" alt="Ventana Mis clips" width="85%"></p>
 
@@ -59,13 +63,16 @@ Se abre con **clic izquierdo** en el ícono (o con `jugadon.exe --clips`, útil 
 
 - **Barra lateral**: secciones Todo / Clips / Grabaciones / Capturas con su cantidad, botón grande **Grabar pantalla** (se pone rojo con el reloj mientras grabás y sirve para frenar), **Guardar clip**, **Abrir carpeta**, **Ajustes** (el mismo menú del ícono) y el estado actual.
 - **Tarjetas grandes** con miniatura, etiqueta de color (clip, grabación, captura) y duración. Al pasar el mouse aparecen el botón **▶** y los botones rápidos **Compartir**, **Copiar** (para pegar con Ctrl+V en Discord o WhatsApp) y **Eliminar** (va a la papelera).
-- **Un toque en un clip lo abre en el visor/editor**: se ve con el reproductor de Windows (decodifica la placa), y arrastrando las manijas amarillas de la barra elegís qué parte guardar (**Guardar recorte**, una copia instantánea sin recomprimir). Espacio pausa, flechas adelantan 5 s, I y O marcan inicio y fin, Esc cierra. Desde ahí también: Copiar link, Para Discord y abrirlo en el reproductor de Windows.
+- **Un toque en un clip lo abre en el visor/editor**: se ve con el reproductor de Windows (decodifica la placa), y arrastrando las manijas amarillas de la barra elegís qué parte guardar (**Guardar recorte**, una copia instantánea sin recomprimir). Espacio pausa, flechas adelantan 5 s, I y O marcan inicio y fin, Esc cierra. Desde ahí también: Vertical, Sonido, Copiar link, Discord y abrirlo en el reproductor de Windows.
 - **Copiar link** (el botón 🔗 de la tarjeta): sube el clip a un servicio gratuito sin cuenta (litterbox/catbox; si no responde, uguu o gofile) y deja el link copiado. Lo abre cualquiera en el navegador, en Discord o en WhatsApp, tenga o no la app. **Se borra solo a los 2 o 3 días** (según el servicio que respondió; el aviso te lo dice); con clic derecho → "Copiar link permanente" queda para siempre (hasta 200 MB). Si el mismo clip ya tiene link, lo copia al instante sin volver a subirlo.
 - **Clic derecho** en una tarjeta:
   - **Favorito ⭐**: aparecen en la sección Favoritos y la limpieza automática nunca los borra.
   - **Renombrar** (o F2): le ponés nombre a la jugada ("ace en Valorant"), sin perder la fecha.
   - **Achicar para Discord**: una copia de menos de 10 MB, comprimida por la placa, para mandarla sin Nitro.
   - **Recortar**: dejar solo los últimos 10 s, 15 s, 30 s o 1 minuto, o sacar los primeros 5, 10 o 30 s. Es una copia instantánea, sin perder calidad.
+  - **Vertical para TikTok, Reels y Shorts**: una copia 1080×1920, *recortada al centro* o *entera con el fondo desenfocado*, comprimida por la placa.
+  - **Sonido: mi voz y el juego por separado**: sacar tu voz, dejar solo tu voz, tu voz más fuerte o más baja, o el juego más bajo. Es una copia instantánea (el video no se recomprime). Sirve para los clips grabados con el micrófono activado.
+  - **Marcar para juntar** (o **Ctrl + clic**): cada clip marcado lleva un número verde; abajo aparece la barra **Juntar** que arma un solo video en ese orden.
   - Abrir, Compartir, Copiar, Mostrar en carpeta y Eliminar. **Doble clic** abre el video.
 - **Todo con teclado**: Tab recorre las secciones y los botones, flechas para moverte entre clips, Enter abre, Supr elimina, Ctrl+C copia, tecla de menú (o Shift+F10) abre las opciones del clip, F5 actualiza. Lo que tiene el foco se marca con un borde blanco.
 

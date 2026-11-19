@@ -26,13 +26,23 @@ menú -> "Grabar una ventana" y la elegís. Sale solo esa ventana, aunque
 tengas otra cosa adelante. F8 la frena y la guarda.
 
 Los archivos van a: %USERPROFILE%\Videos\Jugadon
-Al guardar suena un "tin-tin" y aparece un aviso: tocalo para ver el clip.
+Al guardar suena un "tin-tin" y arriba a la derecha aparece un cartelito
+("Clip guardado") que no sale en tus clips. Se apaga en Opciones.
 Menú -> "Copiar último clip" y lo pegás con Ctrl+V en Discord o WhatsApp.
 
 Clic IZQUIERDO en el ícono: ventana "Mis clips" (abrir, compartir, copiar
 para Discord, acortar, borrar). Clic derecho en un clip -> "Acortar" deja
 solo los últimos segundos en una copia. Cerrala con la X: Jugadón sigue en
 la bandeja. También se maneja con el teclado (Tab, flechas, Enter, Supr).
+
+Más cosas con clic derecho en un clip:
+  - "Vertical para TikTok, Reels y Shorts" (recortado o con fondo borroso)
+  - "Sonido": sacar tu voz, dejar solo tu voz, o bajar el juego o tu voz
+    (tu voz se graba en una pista aparte, así lo cambiás sin regrabar)
+  - "Marcar para juntar" (o Ctrl + clic) y después "Juntar": arma un solo
+    video con varios clips, en el orden en que los marcaste.
+
+Cuando sale una versión nueva, Jugadón te avisa (y aparece un botón verde).
 
 Clic DERECHO en el ícono para abrir el menú. Ahí podés:
   - cambiar la duración (15 s a 5 min)
