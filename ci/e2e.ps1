@@ -93,6 +93,7 @@ function Cfg([string]$k) { ((Get-Content $cfg) | Where-Object { $_ -like "$k=*" 
 function Snap([IntPtr]$h, [string]$name) {
   $r = New-Object W+RECT
   if ([W]::DwmGetWindowAttribute($h, 9, [ref]$r, 16) -ne 0) { [void][W]::GetWindowRect($h, [ref]$r) }
+  if (($r.R - $r.L) -le 0 -or ($r.B - $r.T) -le 0) { Write-Host "  AVISO  no pude sacar la foto $name (ventana sin tamaño)" -ForegroundColor Yellow; return }
   $bmp = New-Object System.Drawing.Bitmap ($r.R - $r.L), ($r.B - $r.T)
   $g = [System.Drawing.Graphics]::FromImage($bmp)
   $g.CopyFromScreen($r.L, $r.T, 0, 0, $bmp.Size)
@@ -142,8 +143,11 @@ try {
   $n = (Files 'clip_*.mp4').Count
   Key 0x78
   Check-Video (Wait-New 'clip_*.mp4' $n 40) 10 "F9: el clip"
-  Check (Wait-Until { Log-Has 'cartel en pantalla: Clip guardado' } 15) "F9 muestra el cartel 'Clip guardado' arriba del juego"
-  Check ([W]::FindWindow('jugadon_aviso', [NullString]::Value) -ne [IntPtr]::Zero) "el cartel es una ventana aparte que no sale en los clips"
+  $shown = Wait-Until { (Log-Has 'cartel en pantalla: Clip guardado') -or (Log-Has 'no deja ocultarlo') } 15
+  Check $shown "F9 avisa con el cartel arriba del juego (o, si este Windows no deja ocultarlo de la grabación, no lo muestra)"
+  if (Log-Has 'cartel en pantalla: Clip guardado') {
+    Check ([W]::FindWindow('jugadon_aviso', [NullString]::Value) -ne [IntPtr]::Zero) "el cartel es una ventana aparte que no sale en los clips"
+  } else { Write-Host "  AVISO  este Windows no deja ocultar el cartel de la grabación: no se muestra (bien)" -ForegroundColor Yellow }
   Get-Content $log | Select-String 'audio:' | Select-Object -Last 1 | ForEach-Object { Write-Host "         log: $($_.Line)" }
   $n = (Files 'shot_*.png').Count
   Key 0x79

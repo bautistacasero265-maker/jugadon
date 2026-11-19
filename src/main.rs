@@ -2071,6 +2071,31 @@ mod app {
         }
     }
 
+    /// Corre ffmpeg escribiendo a "archivo.mp4.part" y recién al terminar bien lo renombra:
+    /// en la galería (y para compartir) nunca aparece un video a medio escribir.
+    fn ffmpeg_to_file(ffmpeg: &Path, log: &Path, mut args: Vec<String>, out: &Path) -> bool {
+        let mut tmp = out.as_os_str().to_owned();
+        tmp.push(".part");
+        let tmp = PathBuf::from(tmp);
+        if args.last().map(String::as_str) == Some(&*out.to_string_lossy()) {
+            args.pop();
+            args.extend(["-f".to_string(), "mp4".to_string(), tmp.to_string_lossy().into_owned()]);
+        } else {
+            return false;
+        }
+        let mut cmd = Command::new(ffmpeg);
+        cmd.args(&args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(log_stdio(log));
+        let ok = spawn_hidden(&mut cmd, IDLE).and_then(|mut c| c.wait()).is_ok_and(|s| s.success());
+        let ok = ok && fs::metadata(&tmp).is_ok_and(|m| m.len() > 0) && {
+            let _ = fs::remove_file(out);
+            fs::rename(&tmp, out).is_ok()
+        };
+        if !ok {
+            let _ = fs::remove_file(&tmp);
+        }
+        ok
+    }
+
     /// Nombre libre para una copia: "clip_X_tag.mp4", o "clip_X_tag2.mp4" si ya existe.
     fn free_name(f: &Path, tag: &str) -> PathBuf {
         let name = f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -2865,9 +2890,7 @@ mod app {
             self.play_sound();
             let (ffmpeg, log) = (self.ffmpeg.clone(), self.log_path.clone());
             std::thread::spawn(move || {
-                let mut cmd = Command::new(ffmpeg);
-                cmd.args(&args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(log_stdio(&log));
-                let ok = spawn_hidden(&mut cmd, IDLE).and_then(|mut c| c.wait()).is_ok_and(|s| s.success());
+                let ok = ffmpeg_to_file(&ffmpeg, &log, args, Path::new(&out));
                 if ok {
                     post_text(format!("Clip guardado (con {who}): {name}\nClic acá para verlo."), Some(out));
                 } else {
@@ -3476,9 +3499,7 @@ mod app {
                     3 => logic::cut_args(&src, a, b, &dst),
                     _ => logic::discord_args(enc, &src, dur.unwrap_or(60), &dst),
                 };
-                let mut cmd = Command::new(ffmpeg);
-                cmd.args(&args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(log_stdio(&log));
-                let ok = spawn_hidden(&mut cmd, IDLE).and_then(|mut c| c.wait()).is_ok_and(|s| s.success());
+                let ok = ffmpeg_to_file(&ffmpeg, &log, args, &out);
                 let size = fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
                 if ok && size > 0 {
                     let msg = match op {
@@ -3524,9 +3545,7 @@ mod app {
                     return;
                 }
                 let args = if op < 10 { logic::vertical_args(enc, &src, op == 1, &dst) } else { logic::sound_args(&src, op - 10, &dst) };
-                let mut cmd = Command::new(&ffmpeg);
-                cmd.args(&args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(log_stdio(&log));
-                let ok = spawn_hidden(&mut cmd, IDLE).and_then(|mut c| c.wait()).is_ok_and(|s| s.success());
+                let ok = ffmpeg_to_file(&ffmpeg, &log, args, &out);
                 let size = fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
                 let fname = out.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 if ok && size > 0 {
@@ -3589,9 +3608,7 @@ mod app {
                     .collect();
                 let total: f64 = inputs.iter().map(|x| x.1.dur).sum();
                 let dst = out.to_string_lossy().into_owned();
-                let mut cmd = Command::new(&ffmpeg);
-                cmd.args(logic::join_args(enc, &inputs, &dst)).stdin(Stdio::null()).stdout(Stdio::null()).stderr(log_stdio(&log));
-                let ok = spawn_hidden(&mut cmd, IDLE).and_then(|mut c| c.wait()).is_ok_and(|s| s.success());
+                let ok = ffmpeg_to_file(&ffmpeg, &log, logic::join_args(enc, &inputs, &dst), &out);
                 let fname = out.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 if ok && fs::metadata(&out).is_ok_and(|m| m.len() > 0) {
                     post_text(format!("Listo: juntaste {n} clips en un solo video ({}): {fname}", logic::fmt_elapsed(total.round() as u64)), Some(dst));
@@ -5897,6 +5914,7 @@ mod app {
             WM_DESTROY => {
                 // cerrar: se apaga el reproductor y se devuelve todo
                 let _ = KillTimer(Some(hwnd), 1);
+                with_app(|a| log_line(&a.log_path, "visor cerrado"));
                 let v = with_app(|a| a.viewer.take()).flatten();
                 drop(v);
                 trim_ram();
@@ -6348,6 +6366,11 @@ mod app {
                 let _ = File::create(&log_path);
             }
             log_line(&log_path, "inicio");
+            {
+                // si algo falla de verdad, que quede escrito dónde (para arreglarlo)
+                let lp = log_path.clone();
+                std::panic::set_hook(Box::new(move |info| log_line(&lp, &format!("ERROR INTERNO: {info}"))));
+            }
             let appdata = env_path("APPDATA", ".");
             let cfg_path = appdata.join("Jugadon").join("config.ini");
             // config de la versión anterior (rclip), si existe
