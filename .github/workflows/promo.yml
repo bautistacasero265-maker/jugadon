@@ -71,7 +71,7 @@ jobs:
             out/Jugadon-promo.mp4
             out/Jugadon-promo-portada.jpg
           body: |
-            Video promocional vertical (1080×1920, ~22 s) para **TikTok, Instagram Reels y YouTube Shorts**.
+            Video promocional vertical (1080×1920, 60 fps, ~25 s) para **TikTok, Instagram Reels y YouTube Shorts**.
 
             - Bajá **Jugadon-promo.mp4** (abajo, en *Assets*) y subilo tal cual.
             - **Jugadon-promo-portada.jpg** sirve de portada/miniatura.

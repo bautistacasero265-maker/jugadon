@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Video promocional vertical (1080x1920, ~25 s) de Jugadón, para TikTok / Reels / Shorts.
+"""Video promocional vertical (1080x1920, 60 fps, ~25 s) de Jugadón, para TikTok / Reels / Shorts.
 
 Se genera todo acá, en la nube:
 - voz neural argentina (edge-tts, es-AR) con el momento exacto de cada palabra; si falla, Piper.
@@ -17,7 +17,9 @@ import asyncio
 import math
 import os
 import random
+import re
 import subprocess
+import unicodedata
 import wave
 
 import numpy as np
@@ -25,7 +27,7 @@ from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(ROOT)
-W, H, FPS, SR = 1080, 1920, 30, 48000
+W, H, FPS, SR = 1080, 1920, 60, 48000
 BPM = 128
 
 ORANGE = (255, 138, 0)
@@ -109,43 +111,58 @@ async def _edge(text, voice, rate, pitch, mp3):
     return words
 
 
+def _norm(w):
+    w = unicodedata.normalize("NFD", w.lower())
+    return "".join(c for c in w if c.isalnum())
+
+
+def _tokens(line):
+    return [t for t in re.findall(r"[\wÁÉÍÓÚáéíóúñÑü]+", line) if _norm(t)]
+
+
 def synth_voice(args):
-    """Lista de (audio float32 48 kHz, [(segundo, palabra)]) por línea, o None (sin voz, para probar)."""
+    """Toda la locución de UNA sola vez (sin cortes entre frases, entonación natural).
+    Devuelve (audio float32 48 kHz, [(segundo, palabra, número de frase)]) o None (sin voz, para probar)."""
     if args.no_voice:
         return None
     os.makedirs(args.tmp, exist_ok=True)
-    out = []
-    for i, (say, _) in enumerate(SCRIPT):
-        wav = os.path.join(args.tmp, f"voz_{i}.wav")
-        words = None
-        try:
-            mp3 = os.path.join(args.tmp, f"voz_{i}.mp3")
-            words = asyncio.run(_edge(say, args.edge_voice, args.rate, args.pitch, mp3))
-            subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", mp3, "-ac", "1", "-ar", str(SR), wav], check=True)
-        except Exception as e:  # sin internet o servicio caído: Piper (más robótica, pero anda offline)
-            if not args.voice:
-                raise
-            print("edge-tts no anduvo, uso Piper:", e)
-            subprocess.run([args.piper, "--model", args.voice, "--output_file", wav, "--length_scale", "0.85"], input=say.encode(), check=True)
-            words = None
-        a = wav_to_array(wav)
-        # recortar silencios de las puntas (y correr los tiempos de las palabras)
-        nz = np.where(np.abs(a) > 0.015)[0]
-        cut0 = max(0, nz[0] - 600) if len(nz) else 0
-        cut1 = nz[-1] + 2000 if len(nz) else len(a)
-        a = a[cut0:cut1]
-        if not words:
-            ws = say.split()
-            wt = [len(x) + 2 for x in ws]
-            span = len(a) / SR
-            acc, words = 0, []
-            for x, k in zip(ws, wt):
-                words.append((span * acc / sum(wt), x))
-                acc += k
-        else:
-            words = [(max(0.0, t - cut0 / SR), w) for t, w in words]
-        out.append((a, words))
-    return out
+    full = " ".join(line for line, _ in SCRIPT)
+    wav = os.path.join(args.tmp, "voz.wav")
+    bounds = None
+    try:
+        mp3 = os.path.join(args.tmp, "voz.mp3")
+        bounds = asyncio.run(_edge(full, args.edge_voice, args.rate, args.pitch, mp3))
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", mp3, "-ac", "1", "-ar", str(SR), wav], check=True)
+    except Exception as e:  # sin internet o servicio caído: Piper (más robótica, pero anda offline)
+        if not args.voice:
+            raise
+        print("edge-tts no anduvo, uso Piper:", e)
+        subprocess.run([args.piper, "--model", args.voice, "--output_file", wav, "--length_scale", "0.85", "--sentence_silence", "0.05"], input=full.encode(), check=True)
+    a = wav_to_array(wav)
+    nz = np.where(np.abs(a) > 0.015)[0]
+    cut0 = max(0, nz[0] - 900) if len(nz) else 0
+    a = a[cut0:(nz[-1] + 4000 if len(nz) else len(a))]
+    expected = [(tok, i) for i, (line, _) in enumerate(SCRIPT) for tok in _tokens(line)]
+    words = []
+    if bounds:
+        bounds = [(t - cut0 / SR, w) for t, w in bounds]
+        # se empareja cada palabra esperada con la que dijo la voz (por si separa distinto los números)
+        j = 0
+        for tok, line in expected:
+            for k in range(j, min(j + 4, len(bounds))):
+                if _norm(bounds[k][1]) == _norm(tok) or _norm(tok).startswith(_norm(bounds[k][1])):
+                    words.append((max(0.0, bounds[k][0]), bounds[k][1], line))
+                    j = k + 1
+                    break
+    if len({w[2] for w in words}) < len(SCRIPT):
+        # respaldo: repartir por letras
+        span = len(a) / SR
+        wt = [len(t) + 2 for t, _ in expected]
+        acc, words = 0, []
+        for (tok, line), k in zip(expected, wt):
+            words.append((span * acc / sum(wt), tok, line))
+            acc += k
+    return a, words
 
 
 # ---------------------------------------------------------------- audio
@@ -244,34 +261,72 @@ def click():
     return noise(n, 5) * env_exp(n, 140) * 0.7
 
 
+def pluck(freq, dur, bright=1.0):
+    n = int(SR * dur)
+    t = np.arange(n) / SR
+    x = np.sign(np.sin(2 * np.pi * freq * t)) * 0.5 + np.sin(2 * np.pi * freq * 2 * t) * 0.3 * bright
+    return (x * np.exp(-t * 14)).astype(np.float32)
+
+
 def music(total, drop_at, beat):
-    """Beat electrónico de 128 BPM con 'bombeo' (sidechain): tenso en el gancho, explota en el drop."""
-    buf = np.zeros(int(total * SR) + SR, dtype=np.float32)
-    bass = np.zeros_like(buf)
+    """Beat de 128 BPM en estéreo, brillante y con empuje.
+    Antes del drop: arpegio filtrado que va abriendo (sube la tensión, sin silencios).
+    Después: bombo, palmas, hi-hats, bajo con bombeo y arpegio abierto a los costados."""
+    n = int(total * SR) + SR
+    L = np.zeros(n, np.float32)
+    R = np.zeros(n, np.float32)
     k, c = kick(), clap()
+    chords = [(220.0, 261.6, 329.6), (174.6, 220.0, 261.6), (261.6, 329.6, 392.0), (196.0, 246.9, 293.7)]  # Am F C G
     roots = [55.0, 43.65, 65.41, 49.0]
+    bass = np.zeros(n, np.float32)
     t, i = 0.0, 0
     while t < total:
-        if t >= drop_at:
-            add(buf, k, t, 0.95)
+        bar = (i // 4) % 4
+        after = t >= drop_at
+        ch = chords[bar]
+        # arpegio en semicorcheas, alternando izquierda/derecha
+        for q in range(4):
+            tq = t + q * beat / 4
+            f = ch[(i * 4 + q) % 3] * (2 if q % 2 else 1)
+            p = pluck(f, beat * 0.5, 1.0 if after else 0.3)
+            vol = 0.16 if after else 0.05 + 0.13 * min(1.0, t / max(drop_at, 0.1))
+            add(L, p, tq, vol * (1.0 if q % 2 == 0 else 0.45))
+            add(R, p, tq, vol * (0.45 if q % 2 == 0 else 1.0))
+        if after:
+            add(L, k, t, 1.0)
+            add(R, k, t, 1.0)
             if i % 2 == 1:
-                add(buf, c, t, 0.55)
-            add(buf, hat(i), t + beat / 2, 1.0)
-            add(buf, hat(i + 99), t + beat * 0.75, 0.5)
-            root = roots[(i // 8) % 4]
-            n = int(SR * beat)
-            tt = np.arange(n) / SR
-            saw = (2 * ((tt * root * 2) % 1) - 1) * 0.6 + np.sin(2 * np.pi * root * tt)
-            # bombeo: el bajo sube después de cada bombo
-            pump = 1 - np.exp(-tt * 14)
-            add(bass, (saw * pump).astype(np.float32), t, 0.28)
+                add(L, c, t, 0.6)
+                add(R, c, t + 0.008, 0.6)
+            add(L, hat(i), t + beat / 2, 0.9)
+            add(R, hat(i + 50), t + beat / 4, 0.6)
+            add(R, hat(i + 99), t + beat * 0.75, 0.6)
+            root = roots[bar]
+            m = int(SR * beat)
+            tt = np.arange(m) / SR
+            saw = (2 * ((tt * root * 2) % 1) - 1) * 0.5 + np.sin(2 * np.pi * root * tt)
+            add(bass, (saw * (1 - np.exp(-tt * 14))).astype(np.float32), t, 0.32)
         else:
-            # gancho: pulso grave tenso
-            add(buf, np.sin(2 * np.pi * 55 * np.arange(int(SR * beat)) / SR).astype(np.float32) * env_exp(int(SR * beat), 6), t, 0.35)
+            # antes del drop: bombo suave cada 2 tiempos para que no se sienta vacío
+            if i % 2 == 0:
+                add(L, k, t, 0.45)
+                add(R, k, t, 0.45)
         t += beat
         i += 1
-    bass = onepole(bass, 0.12)
-    return (buf + bass)[: int(total * SR)]
+    bass = onepole(bass, 0.15)
+    L += bass
+    R += bass
+    return np.stack([L, R], axis=1)[: int(total * SR)]
+
+
+def save_wav(path, x):
+    x = np.clip(x, -1, 1)
+    ch = 1 if x.ndim == 1 else x.shape[1]
+    with wave.open(path, "wb") as w:
+        w.setnchannels(ch)
+        w.setsampwidth(2)
+        w.setframerate(SR)
+        w.writeframes((x * 32767).astype("<i2").tobytes())
 
 
 # ---------------------------------------------------------------- dibujo
@@ -572,7 +627,7 @@ def sc_light(img, t, dur, ctx):
     if t > 1.1:
         s = ease_back((t - 1.1) / 0.25)
         tc(d, 1230, "MENOS QUE UNA FOTO", int(84 * min(1.1, s)), YELLOW, stroke=8)
-        sticker(img, "🤯", W // 2, 1440, 1.25, t, 160)
+        sticker(img, "🤯", W - 150, 470, 1.25, t, 160, 12)
 
 
 def cursor(img, x, y, down):
@@ -713,13 +768,25 @@ def caption(img, words, t):
 
 # ---------------------------------------------------------------- armado
 
+def whip(img, amount, direction=1):
+    """Transición de barrido: la escena nueva entra deslizándose con desenfoque de movimiento."""
+    off = int(W * 0.22 * amount) * direction
+    if off == 0:
+        return img
+    base = ImageChops.offset(img, off, 0)
+    acc = np.asarray(base, np.float32)
+    for k in (0.33, 0.66):
+        acc += np.asarray(ImageChops.offset(img, int(off * (1 + k)), 0), np.float32)
+    return Image.fromarray((acc / 3).astype(np.uint8))
+
+
 def main():
     global BG, GLOWS
     ap = argparse.ArgumentParser()
     ap.add_argument("--no-voice", action="store_true", help="sin voz (para probar el armado)")
     ap.add_argument("--edge-voice", default="es-AR-TomasNeural")
-    ap.add_argument("--rate", default="+18%")
-    ap.add_argument("--pitch", default="+4Hz")
+    ap.add_argument("--rate", default="+14%")
+    ap.add_argument("--pitch", default="+3Hz")
     ap.add_argument("--voice", help="modelo .onnx de Piper (respaldo si edge-tts no anda)")
     ap.add_argument("--piper", default="piper")
     ap.add_argument("--out", default=os.path.join(REPO, "promo", "out", "Jugadon-promo.mp4"))
@@ -735,26 +802,30 @@ def main():
     icon = Image.open(os.path.join(REPO, "assets", "icon.png")).convert("RGBA")
     shot = Image.open(os.path.join(REPO, "assets", "captura_ventana.png")).convert("RGB")
 
-    voices = synth_voice(args)
-    durs, words_per = [], []
-    for i, (say, _) in enumerate(SCRIPT):
-        if voices:
-            a, ws = voices[i]
-            v = len(a) / SR
-        else:
-            ws_ = say.split()
-            v = len(say) * 0.05
-            wt = [len(x) + 2 for x in ws_]
-            acc, ws = 0, []
-            for x, k in zip(ws_, wt):
-                ws.append((v * acc / sum(wt), x))
-                acc += k
-        durs.append(max(1.4, v + 0.18))
-        words_per.append(ws)
-    starts = np.cumsum([0] + durs[:-1]).tolist()
-    total = sum(durs) + 0.25
+    voice = synth_voice(args)
+    if voice:
+        vaudio, words = voice
+        vlen = len(vaudio) / SR
+    else:
+        # sin voz: tiempos inventados por cantidad de letras
+        vaudio, words, acc = None, [], 0.0
+        for i, (line, _) in enumerate(SCRIPT):
+            for tok in _tokens(line):
+                words.append((acc, tok, i))
+                acc += 0.06 * (len(tok) + 2)
+            acc += 0.15
+        vlen = acc
+    lead = 0.15  # la voz arranca un toque después del primer cuadro
+    # cada escena empieza un poquito antes de su primera palabra (el corte "anticipa" lo que se dice)
+    starts = [0.0]
+    for i in range(1, len(SCRIPT)):
+        first = min((w[0] for w in words if w[2] == i), default=starts[-1] + 2.0)
+        starts.append(max(starts[-1] + 0.8, first + lead - 0.12))
+    total = vlen + lead + 1.7  # el final queda un ratito en pantalla con el botón
+    durs = [b_ - a_ for a_, b_ in zip(starts, starts[1:] + [total])]
+    words_per = [[(w[0] + lead - starts[i], w[1]) for w in words if w[2] == i] for i in range(len(SCRIPT))]
     beat = 60 / BPM
-    print(f"duración total: {total:.1f} s")
+    print(f"duración total: {total:.1f} s; escenas: " + ", ".join(f"{d:.1f}" for d in durs))
 
     fx = FX()
     hook_freeze = durs[0] * 0.58
@@ -765,64 +836,66 @@ def main():
     fx.confetti(starts[2] + 0.8, W // 2, 330, 70, 2)
     fx.impact(starts[4] + 1.1, 0.8)
     fx.confetti(starts[6] + 0.8, W // 2, 900, 60, 3)
-    for k, (wt, w_) in enumerate(words_per[7]):
-        if w_.lower().strip(".,!") in ("gratis", "cuentas", "vueltas"):
+    for wt, w_ in words_per[7]:
+        if _norm(w_) in ("gratis", "cuentas", "vueltas"):
             fx.impact(starts[7] + wt, 1.0)
     fx.confetti(starts[8] + 0.3, W // 2, 560, 90, 4)
 
-    # ---------- audio
-    mus = music(total, drop, beat) * 0.5
-    voice_track = np.zeros_like(mus)
-    sfx = np.zeros_like(mus)
-    for i, st in enumerate(starts):
-        if voices:
-            add(voice_track, voices[i][0], st + 0.05, 1.0)
-        if i > 0:
-            add(sfx, whoosh(), st - 0.18, 0.55)
-    add(sfx, riser(hook_freeze), 0.0, 0.5)
-    add(sfx, scratch(), hook_freeze - 0.05, 0.9)
-    add(sfx, boom(), starts[1] + 0.32, 0.9)
+    # ---------- audio: tres pistas y mastering con ffmpeg
+    mus = music(total, drop, beat)
+    sfx = np.zeros(len(mus), np.float32)
+    voice_track = np.zeros(len(mus), np.float32)
+    if vaudio is not None:
+        add(voice_track, vaudio, lead, 1.0)
+    for st in starts[1:]:
+        add(sfx, whoosh(), st - 0.2, 0.7)
+    add(sfx, riser(drop), 0.0, 0.55)
+    add(sfx, scratch(), hook_freeze - 0.05, 0.8)
+    add(sfx, boom(), starts[1] + 0.32, 1.0)
     add(sfx, click(), starts[1] + 0.32, 1.0)
     add(sfx, ding(), starts[2] + 0.75, 1.0)
-    add(sfx, ding(), starts[6] + 0.0, 0.8)
-    for t0, s, _, _ in fx.impacts:
-        add(sfx, boom()[: int(SR * 0.5)] * 0.6, t0, s * 0.6)
+    add(sfx, ding(), starts[6] + 0.0, 0.9)
+    for t0, st_, _, _ in fx.impacts:
+        add(sfx, boom()[: int(SR * 0.5)] * 0.7, t0, st_ * 0.7)
     for i in range(5):
-        add(sfx, pop(), 0.12 + i * 0.22, 0.5)
+        add(sfx, pop(), 0.12 + i * 0.22, 0.6)
     for t0 in (0.35, 0.75, 1.05):
-        add(sfx, pop(), starts[6] + t0, 0.6)
-    # "ducking": la música baja cuando habla la voz
-    if voices:
-        k = int(SR * 0.12)
-        envv = np.convolve(np.abs(voice_track), np.ones(k) / k, mode="same")
-        mus *= 1 - 0.55 * np.clip(envv * 9, 0, 1)
-    # en el congelado del gancho la música se corta (silencio dramático)
+        add(sfx, pop(), starts[6] + t0, 0.7)
+    # en el congelado del gancho la música no se corta: solo baja un poco (sin "parones")
     i0, i1 = int(hook_freeze * SR), int(drop * SR)
-    mus[i0:i1] *= 0.08
-    mix = mus + voice_track * 1.25 + sfx
-    mix /= max(1.0, float(np.max(np.abs(mix))) / 0.95)
+    mus[i0:i1] *= 0.55
+    vpath, mpath, spath = (os.path.join(args.tmp, n) for n in ("v.wav", "m.wav", "s.wav"))
+    save_wav(vpath, voice_track * 0.9)
+    save_wav(mpath, mus / max(1.0, float(np.max(np.abs(mus))) / 0.9))
+    save_wav(spath, sfx / max(1.0, float(np.max(np.abs(sfx))) / 0.9))
     wav = os.path.join(args.tmp, "mix.wav")
-    with wave.open(wav, "wb") as w:
-        w.setnchannels(1)
-        w.setsampwidth(2)
-        w.setframerate(SR)
-        w.writeframes((mix * 32767).astype(np.int16).tobytes())
+    # voz: limpia (pasaaltos), comprimida y con brillo; la música baja sola cuando habla (sidechain);
+    # todo nivelado a -14 LUFS (lo que usan TikTok, Reels y Shorts)
+    graph = (
+        "[0:a]highpass=f=90,equalizer=f=250:t=q:w=1:g=-3,equalizer=f=3500:t=q:w=1.2:g=5,equalizer=f=9000:t=q:w=1:g=2,"
+        "acompressor=threshold=-22dB:ratio=4:attack=4:release=90:makeup=6,aformat=channel_layouts=stereo,asplit=2[v1][v2];"
+        "[1:a][v2]sidechaincompress=threshold=0.03:ratio=5:attack=8:release=260:makeup=1[m];"
+        "[2:a]aformat=channel_layouts=stereo[s];"
+        "[v1][m][s]amix=inputs=3:normalize=0:weights=1.15 0.85 0.8,"
+        "acompressor=threshold=-12dB:ratio=2.5:attack=10:release=150,loudnorm=I=-14:TP=-1.5:LRA=8,alimiter=limit=0.84:level=false,aresample=48000"
+    )
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", vpath, "-i", mpath, "-i", spath, "-filter_complex", graph, "-ar", "48000", "-ac", "2", wav], check=True)
 
-    # ---------- video
+    # ---------- video (60 cuadros por segundo)
     only = set(int(x) for x in args.frames.split(",")) if args.frames else None
     nframes = int(total * FPS)
     proc = None
     if only is None:
         proc = subprocess.Popen(
             ["ffmpeg", "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{W}x{H}", "-r", str(FPS), "-i", "-",
-             "-i", wav, "-c:v", "libx264", "-preset", "medium", "-crf", "17", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
+             "-i", wav, "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "256k",
              "-shortest", "-movflags", "+faststart", args.out],
             stdin=subprocess.PIPE)
     for fi in range(nframes):
         if only is not None and fi not in only:
             continue
         t = fi / FPS
-        si = max(i for i, s in enumerate(starts) if s <= t)
+        si = max(i for i, s_ in enumerate(starts) if s_ <= t)
         lt = t - starts[si]
         kind = SCRIPT[si][1]
         img = background(t, si)
@@ -830,33 +903,34 @@ def main():
         SCENES[kind](img, lt, durs[si], ctx)
         fx.draw(img, t)
         if kind != "cta":
-            caption(img, [(starts[si] + 0.05 + wt - starts[si], w_) for wt, w_ in words_per[si]], lt)
-        # barra de progreso arriba (retención) y logo
+            caption(img, words_per[si], lt)
         d = ImageDraw.Draw(img)
-        d.rectangle((0, 0, W, 14), fill=(40, 34, 56))
-        pw = int(W * t / total)
-        if pw > 2:
-            d.rectangle((0, 0, pw, 14), fill=ORANGE)
         if kind != "cta":
             ic = icon.resize((70, 70), Image.LANCZOS)
             img.paste(ic, (56, 64), ic)
             d.text((142, 72), "Jugadón", font=font(46), fill=WHITE)
-        # zoom: golpe al empezar la escena + latido con el beat (después del drop)
-        z = 1 + 0.08 * math.exp(-lt * 9)
+        # cámara: siempre en movimiento suave + golpe al empezar la escena + latido con el beat + temblor.
+        # Con transformación afín (subpíxel), así no hay saltitos de un píxel.
+        z = 1.035 + 0.06 * math.exp(-lt * 8) + 0.008 * math.sin(t * 0.9)
         if t >= drop:
             ph = ((t - drop) % beat) / beat
-            z += 0.022 * math.exp(-ph * 7)
+            z += 0.02 * math.exp(-ph * 7)
         dx, dy = fx.shake(t)
-        if z > 1.001 or dx or dy:
-            cw, ch = int(W / z), int(H / z)
-            x0 = max(0, min(W - cw, (W - cw) // 2 + dx))
-            y0 = max(0, min(H - ch, (H - ch) // 2 + dy))
-            img = img.crop((x0, y0, x0 + cw, y0 + ch)).resize((W, H), Image.BILINEAR)
-        # corte: glitch + destello
-        if si > 0 and lt < 0.12:
-            img = glitch(img, 1 - lt / 0.12, fi)
-            if lt < 0.05:
-                img = Image.blend(img, Image.new("RGB", (W, H), WHITE), 0.45)
+        cx = W / 2 + math.sin(t * 0.7) * 10 + dx
+        cy = H / 2 + math.cos(t * 0.55) * 14 + dy
+        img = img.transform((W, H), Image.AFFINE, (1 / z, 0, cx - W / 2 / z, 0, 1 / z, cy - H / 2 / z), resample=Image.BILINEAR)
+        # entrada de cada escena: barrido con desenfoque (al drop, glitch)
+        if si > 0 and lt < 0.18:
+            if si == 1:
+                img = glitch(img, 1 - lt / 0.18, fi)
+            else:
+                img = whip(img, 1 - ease_out(lt / 0.18), 1 if si % 2 else -1)
+        # barra de progreso arriba (retención)
+        d = ImageDraw.Draw(img)
+        d.rectangle((0, 0, W, 12), fill=(40, 34, 56))
+        pw = int(W * t / total)
+        if pw > 2:
+            d.rectangle((0, 0, pw, 12), fill=ORANGE)
         # final: glitch que vuelve al principio (loop)
         if t > total - 0.15:
             img = glitch(img, (t - (total - 0.15)) / 0.15, fi)
