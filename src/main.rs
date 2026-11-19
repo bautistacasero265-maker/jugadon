@@ -5586,6 +5586,35 @@ mod app {
         }
     }
 
+    /// Abre el video en el reproductor de Windows. Solo la primera pista de audio (juego + voz);
+    /// si la PC no tiene por dónde sacar sonido, ninguna (si no, Media Foundation se traba).
+    unsafe fn open_player(url: &[u16], video: HWND, sound_out: bool) -> windows::core::Result<windows::Win32::Media::MediaFoundation::IMFPMediaPlayer> {
+        use windows::Win32::Media::MediaFoundation::*;
+        let mut player = None;
+        MFPCreateMediaPlayer(PCWSTR::null(), false, MFP_CREATION_OPTIONS(0), None, Some(video), Some(&mut player))?;
+        let player: IMFPMediaPlayer = player.ok_or_else(windows::core::Error::empty)?;
+        let mut item = None;
+        player.CreateMediaItemFromURL(PCWSTR(url.as_ptr()), true, 0, Some(&mut item))?;
+        let item: IMFPMediaItem = item.ok_or_else(windows::core::Error::empty)?;
+        let n = item.GetNumberOfStreams()?;
+        let mut first_audio = true;
+        for i in 0..n {
+            let is_audio = item.GetStreamAttribute(i, &MF_MT_MAJOR_TYPE).ok().is_some_and(|mut v| {
+                let p = &v.Anonymous.Anonymous;
+                let yes = p.vt.0 == 72 && !p.Anonymous.puuid.is_null() && *p.Anonymous.puuid == MFMediaType_Audio;
+                let _ = windows::Win32::System::Com::StructuredStorage::PropVariantClear(&mut v);
+                yes
+            });
+            if is_audio {
+                let _ = item.SetStreamSelection(i, sound_out && first_audio);
+                first_audio = false;
+            }
+        }
+        player.SetMediaItem(&item)?;
+        player.Play()?;
+        Ok(player)
+    }
+
     impl Drop for Viewer {
         fn drop(&mut self) {
             unsafe {
@@ -5638,17 +5667,13 @@ mod app {
                 // reproductor de Windows (Media Foundation): decodifica la placa de video
                 let _ = windows::Win32::Media::MediaFoundation::MFStartup(0x0002_0070, 1);
                 let url = wide(&path.to_string_lossy());
-                let mut player = None;
-                let created = windows::Win32::Media::MediaFoundation::MFPCreateMediaPlayer(
-                    PCWSTR(url.as_ptr()),
-                    true,
-                    windows::Win32::Media::MediaFoundation::MFP_CREATION_OPTIONS(0),
-                    None,
-                    Some(video),
-                    Some(&mut player),
-                );
-                if let Err(e) = &created {
-                    log_line(&self.log_path, &format!("visor: no se pudo reproducir ({e})"));
+                let sound_out = crate::audio::has_output();
+                let created = open_player(&url, video, sound_out);
+                let player = created.as_ref().ok().cloned();
+                match &created {
+                    Err(e) => log_line(&self.log_path, &format!("visor: no se pudo reproducir ({e})")),
+                    Ok(_) if !sound_out => log_line(&self.log_path, "visor: no hay salida de sonido, se ve sin audio"),
+                    _ => {}
                 }
                 let d = dur.map_or(0.0, |d| d as f64);
                 let v = Viewer {
@@ -6543,6 +6568,17 @@ mod audio {
     }
 
     /// Pipe con buffer chico (4 KB ≈ 10 ms) para saber cuándo ffmpeg empieza a leer.
+    /// ¿Hay por dónde sacar sonido (parlantes, auriculares)?
+    pub fn has_output() -> bool {
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            match CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL) {
+                Ok(en) => en.GetDefaultAudioEndpoint(eRender, eConsole).is_ok(),
+                Err(_) => true,
+            }
+        }
+    }
+
     pub fn small_pipe() -> Option<(OwnedHandle, File)> {
         unsafe {
             let (mut r, mut w) = (HANDLE::default(), HANDLE::default());
